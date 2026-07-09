@@ -39,7 +39,7 @@ builds:
 # 2. PACKAGING
 archives:
   - format: tar.gz
-    # Because we don't specify build IDs here, GoReleaser bundles ALL 
+    # Because we don't specify build IDs here, GoReleaser bundles ALL
     # four binaries into a single archive for each OS/Arch combination.
     name_template: >-
       {{ .ProjectName }}_

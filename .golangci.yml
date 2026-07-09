@@ -1,0 +1,40 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  default: none
+  enable:
+    # - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - modernize
+    - gocritic
+    - unconvert
+    - nilerr
+    - wastedassign
+
+  settings:
+    staticcheck:
+      checks:
+        - "all"
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # Low priority: struct field ordering for memory optimization
+        - shadow          # Low priority: idiomatic Go err re-declarations are flagged
+  exclusions:
+    paths:
+      - ui/ # arrant go files picked up by the linter in ui/node_modules/
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-linter-name: true
+      print-issued-lines: true

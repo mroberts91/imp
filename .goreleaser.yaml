@@ -1,0 +1,75 @@
+version: 2
+
+project_name: imp
+
+before:
+  hooks:
+    - go mod tidy
+
+# 1. CROSS-COMPILATION MATRIX
+builds:
+  - id: imp-api-server
+    main: ./cmd/imp-api-server
+    binary: imp-api-server
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: imp-controllers
+    main: ./cmd/imp-controllers
+    binary: imp-controllers
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: imp-etcl
+    main: ./cmd/imp-etcl
+    binary: imp-etcl
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+  - id: imp-execd
+    main: ./cmd/imp-execd
+    binary: imp-execd
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
+# 2. PACKAGING
+archives:
+  - format: tar.gz
+    # Because we don't specify build IDs here, GoReleaser bundles ALL 
+    # four binaries into a single archive for each OS/Arch combination.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "386" }}i386
+      {{- else }}{{ .Arch }}{{ end }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    format_overrides:
+      - goos: windows
+        format: zip
+
+# 3. AUTO-CHANGELOG
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - 'Merge pull request'
+
+# 4. ARTIFACT SIGNING (Keyless via Cosign & GitHub OIDC)
+signs:
+  - cmd: cosign
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--output-certificate=${certificate}'
+      - '--output-signature=${signature}'
+      - '${artifact}'
+      - '--yes' # Automatically accept the OIDC prompt in CI
+    artifacts: checksum

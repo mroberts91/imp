@@ -1,0 +1,8 @@
+imp
+Copyright Michael Robertson 2026
+
+This product includes designs and code derived from Kubernetes
+(https://github.com/kubernetes/kubernetes),
+Copyright The Kubernetes Authors, licensed under the Apache License 2.0.
+See LICENSES/kubernetes/LICENSE. Files containing derived code carry an
+attribution comment naming the Kubernetes source they fork.

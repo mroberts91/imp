@@ -1,0 +1,71 @@
+#!/sbin/openrc-run
+# imp - declarative single-host process orchestrator (OpenRC service)
+#
+# OpenRC has no DynamicUser equivalent, so the 'imp' system user and the
+# persistent directories are created by install.sh. This script only supplies
+# the runtime (tmpfs) socket directory and the supervision policy.
+#
+# impd is configured by flags only (it reads no environment variables); the
+# IMP_* variables below exist so /etc/conf.d/imp can override the flag values
+# and the log destination in one place.
+
+name="imp"
+description="Declarative single-host process orchestrator"
+
+# --- Configuration (override in /etc/conf.d/imp) --------------------------
+: "${IMP_USER:=imp}"
+: "${IMP_GROUP:=imp}"
+: "${IMP_BIN_DIR:=/usr/local/bin}"
+: "${IMP_DATA_DIR:=/var/lib/imp}"
+: "${IMP_MANIFEST_DIR:=/etc/imp/manifests}"
+: "${IMP_RUN_DIR:=/run/imp}"
+: "${IMP_SOCKET:=${IMP_RUN_DIR}/impd.sock}"
+: "${IMP_LOG_FILE:=/var/log/imp/impd.log}"
+
+command="${IMP_BIN_DIR}/impd"
+command_args="--socket ${IMP_SOCKET} --data-dir ${IMP_DATA_DIR} --manifest-dir ${IMP_MANIFEST_DIR}"
+
+# Drop privileges to the unprivileged service user (single-user model).
+command_user="${IMP_USER}:${IMP_GROUP}"
+
+# Let OpenRC daemonize impd and track it by pidfile.
+command_background="yes"
+pidfile="/run/imp.pid"
+
+# impd logs JSON to stderr; under systemd journald would catch it, here we
+# redirect it to a file. (No rotation is set up - pair with logrotate if the
+# host runs long.)
+output_log="${IMP_LOG_FILE}"
+error_log="${IMP_LOG_FILE}"
+
+# Shutdown policy: signal only impd and give it up to 90s to drain its Procs
+# itself before OpenRC escalates to SIGKILL. Mirrors systemd's KillMode=process
+# + TimeoutStopSec=90.
+retry="SIGTERM/90"
+
+depend() {
+    need localmount
+    use logger
+    after net
+}
+
+start_pre() {
+    # /run is tmpfs: recreate the socket directory each boot, owned by the
+    # service user, mode 0750. checkpath is OpenRC's idempotent equivalent of
+    # systemd's RuntimeDirectory=.
+    checkpath --directory --mode 0750 \
+        --owner "${IMP_USER}:${IMP_GROUP}" "${IMP_RUN_DIR}"
+    # The log file must be writable by the service user before start-stop-daemon
+    # redirects into it.
+    checkpath --file --mode 0640 \
+        --owner "${IMP_USER}:${IMP_GROUP}" "${IMP_LOG_FILE}"
+}
+
+# --- Multi-user supervision hook (DISABLED: single-user build) -------------
+# OpenRC cannot grant ambient capabilities the way systemd does. To run Procs
+# as OTHER users later you must either:
+#   * run impd as root and let it drop to each Proc's user itself (remove
+#     command_user above), or
+#   * grant file capabilities on the binary:
+#       setcap cap_setuid,cap_setgid+ep /usr/local/bin/impd
+#     (re-applied on every upgrade, since replacing the binary clears caps).

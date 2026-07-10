@@ -1,0 +1,75 @@
+[Unit]
+Description=imp - declarative single-host process orchestrator
+Documentation=https://impd.sh
+After=network.target
+
+[Service]
+# Type=simple for now. If impd later calls sd_notify(READY=1) once the
+# api-server socket is listening, switch to Type=notify for accurate ordering.
+Type=simple
+
+# --- Identity (single-user model) -----------------------------------------
+# impd runs as the unprivileged 'imp' user and launches every Proc as that
+# same user. See the multi-user hook at the bottom to lift this later.
+User=imp
+Group=imp
+
+# --- Invocation -------------------------------------------------------------
+# impd is configured by flags only (it reads no environment variables). These
+# are its built-in defaults, spelled out so the unit is self-documenting; to
+# relocate a path, edit here (or in a drop-in) - and keep the directories'
+# ownership in step (see bootstrap/lib/common.sh ensure_dirs).
+# impd logs JSON to stderr; read it with: journalctl -u imp
+ExecStart=/usr/local/bin/impd \
+    --socket /run/imp/impd.sock \
+    --data-dir /var/lib/imp \
+    --manifest-dir /etc/imp/manifests
+
+# /run is tmpfs and vanishes on reboot. Let systemd (re)create the socket
+# directory before start (owned by User=/Group=, mode 0750) and remove it on
+# stop. This is the one *Directory= directive we use; persistent dirs
+# (/var/lib/imp, /etc/imp) are created by install.sh so that the systemd and
+# OpenRC setups stay identical.
+RuntimeDirectory=imp
+RuntimeDirectoryMode=0750
+
+# --- Shutdown: let impd drain its own children ----------------------------
+# KillMode=process means systemd signals ONLY impd, not the whole cgroup, so
+# impd's ordered shutdown gets to terminate each Proc itself (SIGTERM ->
+# per-Proc grace -> SIGKILL). Give it generous time before systemd escalates.
+# (Default KillMode=control-group would instead nuke every Proc immediately.)
+KillMode=process
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# --- Resilience -----------------------------------------------------------
+Restart=on-failure
+RestartSec=2s
+# A supervisor should survive memory pressure better than the things it runs.
+OOMScoreAdjust=-500
+
+# --- Hardening (deliberately light) ---------------------------------------
+# WARNING: impd is a process supervisor. Sandbox options set here are
+# INHERITED by every daemon impd launches, so aggressive confinement here
+# silently confines your workloads too. Keep this conservative; per-Proc
+# isolation is imp's own job (cgroups/namespaces, later milestones), not the
+# unit's. Uncomment stricter options only if you know your Procs tolerate them.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=true
+# ProtectSystem=strict        # would make /etc,/var read-only -> needs ReadWritePaths
+# PrivateTmp=true             # many daemons expect the real /tmp; off by default
+# ProtectKernelTunables=true
+# ProtectControlGroups=true   # do NOT enable once impd manages cgroups itself
+
+# --- Multi-user supervision hook (DISABLED: this is the single-user build) -
+# To let imp run Procs as OTHER users later, impd must be able to switch
+# credentials (setuid/setgid on exec), which is privileged. Then:
+#   1. delete "NoNewPrivileges=true" above (it blocks privilege changes)
+#   2. uncomment the two lines below to grant just those capabilities:
+# AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_DAC_READ_SEARCH
+# CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_DAC_READ_SEARCH
+# impd still starts as User=imp and drops to each Proc's target user per spec.
+
+[Install]
+WantedBy=multi-user.target

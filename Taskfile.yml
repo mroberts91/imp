@@ -3,11 +3,8 @@ version: '3'
 vars:
   ENV: dev
 
-  APP: imp
-  SERVER: ./cmd/imp-api-server
-  CONT: ./cmd/imp-controllers
-  ETCL: ./cmd/imp-etcl
-  EXECD: ./cmd/imp-execd
+  IMPD: ./cmd/impd
+  IMPCTL: ./cmd/impctl
   EXE: '{{if eq OS "windows"}}.exe{{end}}'
   VERSION:
     sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
@@ -42,15 +39,17 @@ tasks:
       - task: vet
 
   build:
-    desc: Build frontal-trading for the host platform
+    desc: Build impd and impctl for the host platform
     cmds:
-      - go build {{.BUILDVCS}} {{.LDFLAGS}} -v -o bin/{{.APP}}{{.EXE}} {{.SERVER}}
+      - go build {{.BUILDVCS}} {{.LDFLAGS}} -v -o bin/impd{{.EXE}} {{.IMPD}}
+      - go build {{.BUILDVCS}} {{.LDFLAGS}} -v -o bin/impctl{{.EXE}} {{.IMPCTL}}
 
   build:linux:
-    desc: Build a static Linux x64 binary (deploy target)
+    desc: Build static Linux x64 binaries (deploy target)
     cmds:
       - mkdir -p dist
-      - GOOS=linux GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-linux-amd64 {{.SERVER}}
+      - GOOS=linux GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-linux-amd64 {{.IMPD}}
+      - GOOS=linux GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-linux-amd64 {{.IMPCTL}}
     env:
       CGO_ENABLED: "0"
 
@@ -69,42 +68,48 @@ tasks:
     desc: Build for Linux x64
     cmds:
       - mkdir -p dist
-      - GOOS=linux GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-linux-amd64 {{.SERVER}}
+      - GOOS=linux GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-linux-amd64 {{.IMPD}}
+      - GOOS=linux GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-linux-amd64 {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
   build:linux-arm64:
     desc: Build for Linux ARM64
     cmds:
       - mkdir -p dist
-      - GOOS=linux GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-linux-arm64 {{.SERVER}}
+      - GOOS=linux GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-linux-arm64 {{.IMPD}}
+      - GOOS=linux GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-linux-arm64 {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
   build:darwin-amd64:
     desc: Build for macOS x64 (Intel)
     cmds:
       - mkdir -p dist
-      - GOOS=darwin GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-darwin-amd64 {{.SERVER}}
+      - GOOS=darwin GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-darwin-amd64 {{.IMPD}}
+      - GOOS=darwin GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-darwin-amd64 {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
   build:darwin-arm64:
     desc: Build for macOS ARM64 (Apple Silicon)
     cmds:
       - mkdir -p dist
-      - GOOS=darwin GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-darwin-arm64 {{.SERVER}}
+      - GOOS=darwin GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-darwin-arm64 {{.IMPD}}
+      - GOOS=darwin GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-darwin-arm64 {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
   build:windows-amd64:
     desc: Build for Windows x64
     cmds:
       - mkdir -p dist
-      - GOOS=windows GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-windows-amd64.exe {{.SERVER}}
+      - GOOS=windows GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-windows-amd64.exe {{.IMPD}}
+      - GOOS=windows GOARCH=amd64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-windows-amd64.exe {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
   build:windows-arm64:
     desc: Build for Windows ARM64
     cmds:
       - mkdir -p dist
-      - GOOS=windows GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/{{.APP}}-windows-arm64.exe {{.SERVER}}
+      - GOOS=windows GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impd-windows-arm64.exe {{.IMPD}}
+      - GOOS=windows GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-windows-arm64.exe {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
   # ---- Quality ----
@@ -155,7 +160,7 @@ tasks:
   test:short:
     desc: Run tests in short mode (skip integration)
     cmds:
-      - go tool gotestsum --format testname ./... -short
+      - go test -short ./...
 
   coverage:
     desc: Generate HTML coverage report
@@ -195,31 +200,6 @@ tasks:
     cmds:
       - go get -u all
       - go mod tidy
-
-  # ---- Analytics (Python, uv-managed) ----
-
-  analytics:sync:
-    desc: Install analytics (Python) dependencies via uv
-    dir: analytics
-    cmds:
-      - uv sync
-
-  analytics:test:
-    desc: Run the analytics (Python) test suite
-    dir: analytics
-    cmds:
-      - uv run pytest
-
-  backfill:
-    desc: 'Backfill IEM station history into the store (P1 T9). Extra flags after --: task backfill -- --years 3 --force'
-    cmds:
-      - uv run --project analytics python -m analytics.backfill {{.CLI_ARGS}}
-
-  goldens:sign:
-    desc: Regenerate Kalshi signature-parity goldens via the official Python SDK
-    dir: analytics
-    cmds:
-      - uv run python scripts/gen_sign_goldens.py
 
   # ---- Packaging & deploy ----
 

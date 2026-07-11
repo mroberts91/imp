@@ -1,0 +1,114 @@
+// Copyright Michael Robertson 2026
+// SPDX-License-Identifier: Apache-2.0
+
+package v1alpha1
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+)
+
+// snapshot is the JSON-round-trip correctness oracle: mutate the copy, then
+// prove the original's serialized form did not change.
+func snapshot(t *testing.T, obj any) string {
+	t.Helper()
+	b, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}
+
+func TestDaemonDeepCopy(t *testing.T) {
+	orig := fullDaemon()
+	before := snapshot(t, orig)
+
+	cp := orig.DeepCopy()
+	if diff := cmp.Diff(orig, cp); diff != "" {
+		t.Fatalf("copy differs from original (-orig +copy):\n%s", diff)
+	}
+
+	// Mutate every reference-typed field of the copy.
+	cp.Metadata.Labels["app"] = "mutated"
+	cp.Metadata.Annotations["new"] = "mutated"
+	cp.Metadata.OwnerReferences = append(cp.Metadata.OwnerReferences, OwnerReference{Name: "x"})
+	*cp.Spec.Replicas = 99
+	cp.Spec.Template.Metadata.Labels["app"] = "mutated"
+	cp.Spec.Template.Spec.Command[0] = "/mutated"
+	cp.Spec.Template.Spec.Env[0].Value = "mutated"
+	*cp.Spec.Template.Spec.TerminationGracePeriodSeconds = 999
+	cp.Status.Conditions[0].Status = ConditionTrue
+
+	if after := snapshot(t, orig); after != before {
+		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestProcDeepCopy(t *testing.T) {
+	orig := fullProc()
+	before := snapshot(t, orig)
+
+	cp := orig.DeepCopy()
+	if diff := cmp.Diff(orig, cp); diff != "" {
+		t.Fatalf("copy differs from original (-orig +copy):\n%s", diff)
+	}
+
+	cp.Metadata.Labels[LabelReplicaIndex] = "9"
+	cp.Metadata.OwnerReferences[0].Name = "mutated"
+	cp.Spec.Command[0] = "/mutated"
+	*cp.Spec.TerminationGracePeriodSeconds = 999
+	cp.Status.State.Running.PID = 1
+	cp.Status.Conditions[0].Status = ConditionFalse
+
+	if after := snapshot(t, orig); after != before {
+		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestProcStateDeepCopyTerminated(t *testing.T) {
+	orig := &ProcStatus{
+		Phase: ProcPhaseFailed,
+		State: ProcState{Terminated: &ProcStateTerminated{
+			ExitCode: new(int(3)),
+			Message:  "exited",
+		}},
+	}
+	cp := orig.DeepCopy()
+	*cp.State.Terminated.ExitCode = 7
+	cp.State.Terminated.Message = "mutated"
+	if *orig.State.Terminated.ExitCode != 3 || orig.State.Terminated.Message != "exited" {
+		t.Errorf("mutating the copy changed the original: %+v", orig.State.Terminated)
+	}
+}
+
+func TestEventDeepCopy(t *testing.T) {
+	orig := fullEvent()
+	before := snapshot(t, orig)
+
+	cp := orig.DeepCopy()
+	if diff := cmp.Diff(orig, cp); diff != "" {
+		t.Fatalf("copy differs from original (-orig +copy):\n%s", diff)
+	}
+
+	cp.Count = 100
+	cp.Regarding.Name = "mutated"
+
+	if after := snapshot(t, orig); after != before {
+		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestDeepCopyNilHandling(t *testing.T) {
+	var d *Daemon
+	if d.DeepCopy() != nil {
+		t.Error("nil Daemon DeepCopy != nil")
+	}
+	// Nil maps and slices stay nil rather than becoming empty.
+	minimal := &Daemon{Metadata: ObjectMeta{Name: "x"}}
+	cp := minimal.DeepCopy()
+	if cp.Metadata.Labels != nil || cp.Metadata.OwnerReferences != nil || cp.Spec.Replicas != nil {
+		t.Errorf("nil fields materialized: %+v", cp)
+	}
+}

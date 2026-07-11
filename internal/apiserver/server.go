@@ -10,6 +10,7 @@ package apiserver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,6 +18,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
+	"time"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/etcl"
@@ -80,6 +83,16 @@ func Listen(socketPath string) (net.Listener, error) {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("apiserver: %s exists and is not a socket; refusing to remove it", socketPath)
 		}
+		conn, err := net.DialTimeout("unix", socketPath, time.Second)
+		if err == nil {
+			conn.Close()
+			return nil, fmt.Errorf("apiserver: %s is in use — another impd is running; refusing to start", socketPath)
+		}
+		if !errors.Is(err, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("apiserver: probing existing socket %s: %w", socketPath, err)
+		}
+		// Connection refused: nobody is accepting, the file is a leftover
+		// from an unclean shutdown.
 		if err := os.Remove(socketPath); err != nil {
 			return nil, fmt.Errorf("apiserver: removing stale socket: %w", err)
 		}

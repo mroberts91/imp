@@ -528,6 +528,56 @@ func TestLogRoute(t *testing.T) {
 	}
 }
 
+func TestListenRefusesLiveSocket(t *testing.T) {
+	f := start(t, nil, nil)
+
+	// A second Listen on a socket someone is serving must fail — this is
+	// the single-instance guard.
+	if _, err := apiserver.Listen(f.socket); err == nil {
+		t.Fatal("Listen on a live socket succeeded; the second instance should be refused")
+	}
+
+	if _, err := f.client.ServerVersion(t.Context()); err != nil {
+		t.Fatalf("first server broken after refused second Listen: %v", err)
+	}
+}
+
+func TestListenReplacesStaleSocket(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "impd.sock")
+
+	// Manufacture an unclean shutdown: a socket file whose owner is gone.
+	l, err := apiserver.Listen(socket)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	l.Close()
+	if _, err := os.Stat(socket); err != nil {
+		t.Fatalf("stale socket file missing after close: %v", err)
+	}
+
+	l2, err := apiserver.Listen(socket)
+	if err != nil {
+		t.Fatalf("Listen over a stale socket: %v", err)
+	}
+	l2.Close()
+}
+
+func TestListenRefusesNonSocketFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "impd.sock")
+	if err := os.WriteFile(path, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := apiserver.Listen(path); err == nil {
+		t.Fatal("Listen over a regular file succeeded; it should refuse")
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "not a socket" {
+		t.Errorf("regular file was disturbed: %q, %v", data, err)
+	}
+}
+
 func unixTransport(socket string) *http.Transport {
 	return &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

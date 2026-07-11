@@ -62,8 +62,8 @@ human operators to the `imp` group so they can talk to it:
 sudo usermod -aG imp alice     # alice re-logs in, then `impctl` works
 ```
 
-`impctl` resolves the socket as `--socket` flag → `IMP_SOCK` env →
-`/run/imp/impd.sock` → `$XDG_RUNTIME_DIR/imp.sock` (so it also finds an ad-hoc
+`impctl` resolves the socket as `--socket` flag -> `IMP_SOCK` env ->
+`/run/imp/impd.sock` -> `$XDG_RUNTIME_DIR/imp.sock` (so it also finds an ad-hoc
 instance with no configuration).
 
 ## Single-user vs multi-user supervision
@@ -87,13 +87,13 @@ The scripts define the interface impd/impctl must honor:
 
 - **`impd serve`** - start the daemon (api-server + controllers + execd).
 - **Path resolution** (both binaries): `--data-dir/--config-dir/--log-dir/`
-  `--socket` flag → `IMP_DATA_DIR` / `IMP_CONFIG_DIR` / `IMP_LOG_DIR` /
-  `IMP_SOCK` env → XDG → built-in default. Manifests live under
+  `--socket` flag -> `IMP_DATA_DIR` / `IMP_CONFIG_DIR` / `IMP_LOG_DIR` /
+  `IMP_SOCK` env -> XDG -> built-in default. Manifests live under
   `$IMP_CONFIG_DIR/manifests`.
 - **Socket** - impd creates `$IMP_SOCK` at mode 0660, owned by its own
   user/group, and removes it on clean shutdown.
-- **Shutdown** - on SIGTERM, impd drains its Procs itself (per-Proc SIGTERM →
-  grace → SIGKILL) and exits within the stop timeout (90s). This is why both
+- **Shutdown** - on SIGTERM, impd drains its Procs itself (per-Proc SIGTERM ->
+  grace -> SIGKILL) and exits within the stop timeout (90s). This is why both
   supervisors signal impd only rather than the whole process group.
 - **Build output** - `install.sh` finds `impd`/`impctl` via `IMP_BIN_SRC`,
   then `./bin`, `../bin`, then `PATH`.

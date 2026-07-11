@@ -1,0 +1,538 @@
+// Copyright Michael Robertson 2026
+// SPDX-License-Identifier: Apache-2.0
+
+// End-to-end tests
+package apiserver_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/mroberts91/imp/api/v1alpha1"
+	"github.com/mroberts91/imp/internal/apiserver"
+	"github.com/mroberts91/imp/internal/etcl"
+	"github.com/mroberts91/imp/pkg/client"
+)
+
+type fixture struct {
+	client *client.Client
+	store  *etcl.Store
+	socket string
+}
+
+func start(t *testing.T, storeOpts *etcl.Options, logs apiserver.LogStreamer) *fixture {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "imp")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+
+	store, err := etcl.Open(filepath.Join(dir, "etcl.db"), storeOpts)
+	if err != nil {
+		t.Fatalf("etcl.Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	srv := apiserver.New(apiserver.Config{
+		Store:   store,
+		Logs:    logs,
+		Version: v1alpha1.VersionInfo{Version: "test", Commit: "abc123"},
+	})
+	socket := filepath.Join(dir, "impd.sock")
+	l, err := apiserver.Listen(socket)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	hs := &http.Server{Handler: srv.Handler()}
+	go hs.Serve(l) //nolint:errcheck // ends with Close
+	t.Cleanup(func() { hs.Close() })
+
+	return &fixture{client: client.New(socket), store: store, socket: socket}
+}
+
+func testDaemon(name string) *v1alpha1.Daemon {
+	return &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: name},
+		Spec: v1alpha1.DaemonSpec{
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}},
+			},
+		},
+	}
+}
+
+func TestApplyCreatesWithDefaults(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	created, err := f.client.ApplyDaemon(ctx, testDaemon("web"))
+	if err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	if created.Metadata.UID == "" || created.Metadata.ResourceVersion != "1" || created.Metadata.Generation != 1 {
+		t.Errorf("identity not assigned: %+v", created.Metadata)
+	}
+	if created.APIVersion != v1alpha1.APIVersion || created.Kind != v1alpha1.KindDaemon {
+		t.Errorf("TypeMeta not stamped: %+v", created.TypeMeta)
+	}
+	// Server-side defaulting happened before the write.
+	if created.Spec.Replicas == nil || *created.Spec.Replicas != 1 {
+		t.Errorf("Replicas = %v, want 1", created.Spec.Replicas)
+	}
+	if created.Spec.UpdateStrategy.Type != v1alpha1.UpdateStrategyRecreate {
+		t.Errorf("UpdateStrategy = %q", created.Spec.UpdateStrategy.Type)
+	}
+	if created.Spec.Template.Spec.StopSignal != "TERM" {
+		t.Errorf("StopSignal = %q, want TERM", created.Spec.Template.Spec.StopSignal)
+	}
+
+	got, err := f.client.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	if got.Metadata.UID != created.Metadata.UID {
+		t.Errorf("Get returned a different object: %+v", got.Metadata)
+	}
+}
+
+func TestApplyReplaceSemantics(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	created, err := f.client.ApplyDaemon(ctx, testDaemon("web"))
+	if err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+
+	// Seed status through the status path, as the controller would.
+	created.Status = v1alpha1.DaemonStatus{Replicas: 1, ObservedGeneration: 1}
+	withStatus, err := f.client.UpdateDaemonStatus(ctx, created)
+	if err != nil {
+		t.Fatalf("UpdateDaemonStatus: %v", err)
+	}
+
+	changed := testDaemon("web")
+	changed.Spec.Template.Spec.Command = []string{"/bin/sleep", "120"}
+	changed.Status = v1alpha1.DaemonStatus{Replicas: 99} // must be ignored
+	replaced, err := f.client.ApplyDaemon(ctx, changed)
+	if err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if replaced.Metadata.Generation != 2 {
+		t.Errorf("generation = %d, want 2", replaced.Metadata.Generation)
+	}
+	if replaced.Metadata.UID != withStatus.Metadata.UID {
+		t.Error("replace changed identity")
+	}
+	if replaced.Status.Replicas != 1 || replaced.Status.ObservedGeneration != 1 {
+		t.Errorf("status not preserved across apply: %+v", replaced.Status)
+	}
+
+	// Idempotent re-apply, no rv churn.
+	again, err := f.client.ApplyDaemon(ctx, changed)
+	if err != nil {
+		t.Fatalf("idempotent re-apply: %v", err)
+	}
+	if again.Metadata.ResourceVersion != replaced.Metadata.ResourceVersion {
+		t.Errorf("no-op apply churned rv: %s -> %s",
+			replaced.Metadata.ResourceVersion, again.Metadata.ResourceVersion)
+	}
+}
+
+func TestApplyValidationErrors(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	bad := testDaemon("web")
+	bad.Spec.Template.Spec.Command = nil
+	bad.Spec.Replicas = new(int32(-1))
+	_, err := f.client.ApplyDaemon(ctx, bad)
+	if !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid", err)
+	}
+	var inv *v1alpha1.InvalidError
+	if !errors.As(err, &inv) {
+		t.Fatalf("err %T does not unwrap to *InvalidError", err)
+	}
+	fields := make(map[string]bool)
+	for _, fe := range inv.Errs {
+		fields[fe.Field] = true
+	}
+	if !fields["spec.replicas"] || !fields["spec.template.spec.command"] {
+		t.Errorf("field errors lost in transit: %v", inv.Errs)
+	}
+
+	_, err = f.client.Apply(ctx, v1alpha1.KindDaemon, "web",
+		[]byte(`{"metadata":{"name":"web"},"spec":{"replicaz":3,"template":{"spec":{"command":["/bin/true"]}}}}`))
+	if !errors.Is(err, v1alpha1.ErrInvalid) || !strings.Contains(err.Error(), "replicaz") {
+		t.Errorf("unknown field: err = %v, want ErrInvalid naming replicaz", err)
+	}
+
+	_, err = f.client.Apply(ctx, v1alpha1.KindDaemon, "web", []byte(`{"kind":"Proc","metadata":{"name":"web"}}`))
+	if !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Errorf("kind mismatch: err = %v, want ErrInvalid", err)
+	}
+
+	_, err = f.client.Apply(ctx, v1alpha1.KindDaemon, "web", []byte(`{"metadata":{"name":"other"},"spec":{"template":{"spec":{"command":["/bin/true"]}}}}`))
+	if !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Errorf("name mismatch: err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestApplyCAS(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	created, err := f.client.ApplyDaemon(ctx, testDaemon("web"))
+	if err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+
+	// An apply carrying a stale rv is a conflict, not a silent overwrite.
+	stale := testDaemon("web")
+	stale.Metadata.ResourceVersion = "999"
+	if _, err := f.client.ApplyDaemon(ctx, stale); !errors.Is(err, v1alpha1.ErrConflict) {
+		t.Errorf("stale rv apply: err = %v, want ErrConflict", err)
+	}
+
+	// Carrying the current rv works.
+	fresh := testDaemon("web")
+	fresh.Metadata.ResourceVersion = created.Metadata.ResourceVersion
+	fresh.Spec.Template.Spec.Command = []string{"/bin/sleep", "90"}
+	if _, err := f.client.ApplyDaemon(ctx, fresh); err != nil {
+		t.Errorf("current rv apply: %v", err)
+	}
+}
+
+func TestListAndDelete(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	for _, name := range []string{"beta", "alpha"} {
+		if _, err := f.client.ApplyDaemon(ctx, testDaemon(name)); err != nil {
+			t.Fatalf("ApplyDaemon(%s): %v", name, err)
+		}
+	}
+	daemons, listRV, err := f.client.ListDaemons(ctx)
+	if err != nil {
+		t.Fatalf("ListDaemons: %v", err)
+	}
+	if len(daemons) != 2 || daemons[0].Metadata.Name != "alpha" || daemons[1].Metadata.Name != "beta" {
+		t.Errorf("ListDaemons = %+v", daemons)
+	}
+	if listRV == "" || listRV == "0" {
+		t.Errorf("listRV = %q, want a real snapshot rv", listRV)
+	}
+
+	// Empty kinds list as empty, not error.
+	procs, _, err := f.client.ListProcs(ctx)
+	if err != nil || len(procs) != 0 {
+		t.Errorf("ListProcs = %v, %v; want empty, nil", procs, err)
+	}
+
+	if err := f.client.DeleteDaemon(ctx, "alpha"); err != nil {
+		t.Fatalf("DeleteDaemon: %v", err)
+	}
+	if _, err := f.client.GetDaemon(ctx, "alpha"); !errors.Is(err, v1alpha1.ErrNotFound) {
+		t.Errorf("get after delete: err = %v, want ErrNotFound", err)
+	}
+	if err := f.client.DeleteDaemon(ctx, "alpha"); !errors.Is(err, v1alpha1.ErrNotFound) {
+		t.Errorf("double delete: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStatusSubResource(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	created, err := f.client.ApplyDaemon(ctx, testDaemon("web"))
+	if err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+
+	// No rv -> required-field error: status writes are always CAS.
+	noRV := *created
+	noRV.Metadata.ResourceVersion = ""
+	if _, err := f.client.UpdateDaemonStatus(ctx, &noRV); !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Errorf("status without rv: err = %v, want ErrInvalid", err)
+	}
+
+	// Stale rv -> conflict.
+	staleRV := *created
+	staleRV.Metadata.ResourceVersion = "999"
+	if _, err := f.client.UpdateDaemonStatus(ctx, &staleRV); !errors.Is(err, v1alpha1.ErrConflict) {
+		t.Errorf("status with stale rv: err = %v, want ErrConflict", err)
+	}
+
+	// A status write cannot contain a spec change.
+	sneaky := *created
+	sneaky.Spec.Template.Spec.Command = []string{"/bin/evil"}
+	sneaky.Status = v1alpha1.DaemonStatus{Replicas: 1}
+	updated, err := f.client.UpdateDaemonStatus(ctx, &sneaky)
+	if err != nil {
+		t.Fatalf("UpdateDaemonStatus: %v", err)
+	}
+	if updated.Spec.Template.Spec.Command[0] != "/bin/sleep" {
+		t.Errorf("status write changed spec: %v", updated.Spec.Template.Spec.Command)
+	}
+	if updated.Status.Replicas != 1 {
+		t.Errorf("status not written: %+v", updated.Status)
+	}
+	if updated.Metadata.Generation != 1 {
+		t.Errorf("status write bumped generation to %d", updated.Metadata.Generation)
+	}
+}
+
+func TestRetryOnConflict(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+	if _, err := f.client.ApplyDaemon(ctx, testDaemon("web")); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+
+	// Two writers race the same status update; RetryOnConflict absorbs the
+	// loser's conflict.
+	race := func(replicas int32) error {
+		return client.RetryOnConflict(func() error {
+			d, err := f.client.GetDaemon(ctx, "web")
+			if err != nil {
+				return err
+			}
+			d.Status.Replicas = replicas
+			_, err = f.client.UpdateDaemonStatus(ctx, d)
+			return err
+		})
+	}
+	errc := make(chan error, 2)
+	go func() { errc <- race(1) }()
+	go func() { errc <- race(2) }()
+	for range 2 {
+		if err := <-errc; err != nil {
+			t.Errorf("racing status update failed despite retry: %v", err)
+		}
+	}
+}
+
+func TestProcSpecImmutable(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	proc := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "web-0-abc123"},
+		Spec:     v1alpha1.ProcSpec{Command: []string{"/bin/sleep", "60"}},
+	}
+	if _, err := f.client.ApplyProc(ctx, proc); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	// Identical re-apply is fine (idempotent).
+	if _, err := f.client.ApplyProc(ctx, proc); err != nil {
+		t.Errorf("idempotent proc re-apply: %v", err)
+	}
+	// A changed spec is rejected, even if the rv is current. Procs are immutable.
+	mutated := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "web-0-abc123"},
+		Spec:     v1alpha1.ProcSpec{Command: []string{"/bin/sleep", "999"}},
+	}
+	if _, err := f.client.ApplyProc(ctx, mutated); !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Errorf("mutating proc spec: err = %v, want ErrInvalid", err)
+	}
+}
+
+func TestEventCountIncrement(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	ev := &v1alpha1.Event{
+		Metadata:  v1alpha1.ObjectMeta{Name: "web-0.1a2b3c"},
+		Regarding: v1alpha1.ObjectRef{Kind: v1alpha1.KindProc, Name: "web-0"},
+		Type:      v1alpha1.EventTypeWarning,
+		Reason:    v1alpha1.ReasonBackOff,
+		Message:   "back-off restarting failed process",
+		Count:     1,
+	}
+	created, err := f.client.ApplyEvent(ctx, ev)
+	if err != nil {
+		t.Fatalf("ApplyEvent: %v", err)
+	}
+
+	created.Count++
+	updated, err := f.client.ApplyEvent(ctx, created)
+	if err != nil {
+		t.Fatalf("count++ apply: %v", err)
+	}
+	if updated.Count != 2 {
+		t.Errorf("count = %d, want 2", updated.Count)
+	}
+}
+
+func TestWatchOverHTTP(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	if _, err := f.client.ApplyDaemon(ctx, testDaemon("pre")); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	_, listRV, err := f.client.ListDaemons(ctx)
+	if err != nil {
+		t.Fatalf("ListDaemons: %v", err)
+	}
+
+	events, cancel, err := f.client.Watch(ctx, v1alpha1.KindDaemon, listRV)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+	defer cancel()
+
+	if _, err := f.client.ApplyDaemon(ctx, testDaemon("post")); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	select {
+	case ev := <-events:
+		if ev.Type != v1alpha1.WatchAdded {
+			t.Errorf("event type = %s, want ADDED", ev.Type)
+		}
+		var d v1alpha1.Daemon
+		if err := json.Unmarshal(ev.Object, &d); err != nil || d.Metadata.Name != "post" {
+			t.Errorf("event object = %s (err %v), want daemon post", ev.Object, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no watch event arrived over HTTP")
+	}
+
+	cancel()
+	select {
+	case _, ok := <-events:
+		if ok {
+			// One buffered event may race the cancel; the close must follow.
+			if _, ok := <-events; ok {
+				t.Error("watch channel still open after cancel")
+			}
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watch channel did not close after cancel")
+	}
+}
+
+func TestWatchCompactedOverHTTP(t *testing.T) {
+	var offset atomic.Int64
+	f := start(t, &etcl.Options{
+		RetainRows:   5,
+		RetainWindow: time.Minute,
+		CompactEvery: 10_000,
+		Now:          func() time.Time { return time.Now().Add(time.Duration(offset.Load()) * time.Second) },
+	}, nil)
+	ctx := t.Context()
+
+	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h"} {
+		if _, err := f.client.ApplyDaemon(ctx, testDaemon(name)); err != nil {
+			t.Fatalf("ApplyDaemon: %v", err)
+		}
+	}
+	offset.Store(3600) // age every changelog row past the retention window
+	if err := f.store.Compact(); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	_, _, err := f.client.Watch(ctx, v1alpha1.KindDaemon, "1")
+	if !errors.Is(err, v1alpha1.ErrCompacted) {
+		t.Errorf("watch from compacted rv: err = %v, want ErrCompacted", err)
+	}
+}
+
+func TestUnknownResourceAndVersion(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	// Unknown kind paths 404 through the wire error translation.
+	hc := &http.Client{Transport: unixTransport(f.socket)}
+	resp, err := hc.Get("http://impd/apis/impd.sh/v1alpha1/gizmos")
+	if err != nil {
+		t.Fatalf("GET gizmos: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown kind status = %d, want 404", resp.StatusCode)
+	}
+
+	v, err := f.client.ServerVersion(ctx)
+	if err != nil {
+		t.Fatalf("ServerVersion: %v", err)
+	}
+	if v.Version != "test" || v.Commit != "abc123" || v.GoVersion == "" {
+		t.Errorf("version = %+v", v)
+	}
+
+	resp2, err := hc.Get("http://impd/healthz")
+	if err != nil {
+		t.Fatalf("GET healthz: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("healthz status = %d, want 200", resp2.StatusCode)
+	}
+}
+
+// fakeStreamer serves log content and records the request.
+type fakeStreamer struct {
+	gotName string
+	gotOpts apiserver.LogOptions
+	content string
+}
+
+func (fs *fakeStreamer) Tail(name string, opts apiserver.LogOptions) (io.ReadCloser, error) {
+	fs.gotName, fs.gotOpts = name, opts
+	if name == "missing" {
+		return nil, v1alpha1.ErrNotFound
+	}
+	return io.NopCloser(strings.NewReader(fs.content)), nil
+}
+
+func TestLogRoute(t *testing.T) {
+	ctx := t.Context()
+
+	f := start(t, nil, nil)
+	if _, err := f.client.ProcLogs(ctx, "web-0", client.LogOptions{}); err == nil {
+		t.Error("ProcLogs with no streamer succeeded")
+	}
+
+	fs := &fakeStreamer{content: "line one\nline two\n"}
+	f = start(t, nil, fs)
+	rc, err := f.client.ProcLogs(ctx, "web-0", client.LogOptions{Follow: true, TailLines: 10, Timestamps: true})
+	if err != nil {
+		t.Fatalf("ProcLogs: %v", err)
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("reading log stream: %v", err)
+	}
+	if string(data) != fs.content {
+		t.Errorf("log content = %q, want %q", data, fs.content)
+	}
+	if fs.gotName != "web-0" || !fs.gotOpts.Follow || fs.gotOpts.TailLines != 10 || !fs.gotOpts.Timestamps {
+		t.Errorf("streamer got name=%q opts=%+v", fs.gotName, fs.gotOpts)
+	}
+	if _, err := f.client.ProcLogs(ctx, "missing", client.LogOptions{}); !errors.Is(err, v1alpha1.ErrNotFound) {
+		t.Errorf("missing proc logs: err = %v, want ErrNotFound", err)
+	}
+}
+
+func unixTransport(socket string) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", socket)
+		},
+	}
+}

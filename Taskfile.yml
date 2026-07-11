@@ -112,6 +112,34 @@ tasks:
       - GOOS=windows GOARCH=arm64 go build {{.BUILDVCS}} -trimpath {{.LDFLAGS}} -o dist/impctl-windows-arm64.exe {{.IMPCTL}}
     env: { CGO_ENABLED: "0" }
 
+  # ---- Run (ad-hoc: current user, XDG dirs, no root) ----
+
+  bootstrap:adhoc:
+    desc: Create per-user XDG dirs for imp and print how to start it
+    deps: [build]
+    cmds:
+      - ./bootstrap/install.sh ad-hoc
+    platforms: [linux, darwin]
+
+  run:
+    desc: Run impd in the foreground as the current user (ad-hoc bootstrap)
+    deps: [build]
+    cmds:
+      - ./bootstrap/install.sh ad-hoc --run
+    platforms: [linux, darwin]
+
+  ctl:
+    desc: 'Run impctl against the ad-hoc impd (usage: task ctl -- get daemons)'
+    preconditions:
+      - sh: test -x bin/impctl
+        msg: bin/impctl not built yet — run `task build` (or `task run` in another session) first
+    cmds:
+      # Same socket path the ad-hoc bootstrap uses (install.sh cmd_adhoc).
+      # No build dep: `task run` already builds, and a rebuild per command
+      # would make the dev loop sluggish.
+      - IMP_SOCKET="${XDG_RUNTIME_DIR:-/tmp/imp-$(id -u)}/imp/impd.sock" bin/impctl {{.CLI_ARGS}}
+    platforms: [linux, darwin]
+
   # ---- Quality ----
 
   fmt:

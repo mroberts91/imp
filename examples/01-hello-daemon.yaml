@@ -1,0 +1,27 @@
+# 01 — The smallest useful manifest.
+#
+# A Daemon declares "keep this process running". This one relies on every
+# default the api-server fills in:
+#
+#   replicas: 1
+#   updateStrategy.type: Recreate
+#   restartPolicy: Always          (restart no matter how it exits)
+#   stopSignal: TERM
+#   terminationGracePeriodSeconds: 30
+#
+# Only three things are required: apiVersion, kind + metadata.name (the
+# object's identity), and spec.template.spec.command.
+#
+#   impctl apply -f examples/01-hello-daemon.yaml
+#   impctl get daemons
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: hello
+spec:
+  template:
+    spec:
+      # command is argv, not a shell line: command[0] is the executable,
+      # the rest are its arguments. No shell is involved unless you ask
+      # for one (see 03-env-and-workdir.yaml).
+      command: ["sh", "-c", "while true; do echo hello from imp; sleep 5; done"]

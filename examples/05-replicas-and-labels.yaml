@@ -1,0 +1,47 @@
+# 05 — Replicas, labels, and how updates roll out.
+#
+# replicas asks for N identical Procs from the same template. Each Proc
+# gets system labels you can use to tell them apart:
+#
+#   impd.sh/daemon-name     — the owning Daemon
+#   impd.sh/replica-index   — 0..N-1
+#   impd.sh/template-hash   — hash of the template that produced it
+#
+# The template-hash label is how updates work: Proc specs are immutable,
+# so editing this template never mutates a running Proc. Instead the
+# daemon controller sees Procs whose hash no longer matches, and — under
+# the Recreate strategy, the only one today — stops the old Procs and
+# creates new ones from the new template.
+#
+#   impctl apply -f examples/05-replicas-and-labels.yaml
+#   impctl get procs        # expect worker-0-<hash>, worker-1-<hash>, worker-2-<hash>
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: worker
+  # Labels on the Daemon itself: identifying, queryable metadata.
+  # Keys may carry a DNS-style prefix (my.org/tier); the impd.sh/ prefix
+  # is reserved for the system.
+  labels:
+    app: worker
+    tier: backend
+spec:
+  replicas: 3
+  updateStrategy:
+    type: Recreate
+  template:
+    # template.metadata is copied onto every Proc created from this
+    # template — this is how you label the Procs, not the Daemon.
+    metadata:
+      labels:
+        app: worker
+      annotations:
+        # Annotations hold non-identifying data; values are free-form
+        # (labels are restricted, annotations are not).
+        my.org/runbook: https://wiki.internal/runbooks/worker
+    spec:
+      command:
+        - sh
+        - -c
+        - while true; do echo "processing queue"; sleep 15; done
+      restartPolicy: Always

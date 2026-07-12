@@ -1,0 +1,93 @@
+# 06 — A complete multi-service stack in one file.
+#
+# A manifest file is a YAML stream: any number of documents separated by
+# `---`. This one runs a small "application": an HTTP server, a pool of
+# workers behind it, and a one-shot setup task — every spec field the
+# API offers, spelled out.
+#
+# Apply it as a unit, or better, drop it in the manifest directory
+# ($IMP_CONFIG_DIR/manifests/) and let impd own it: the watcher applies
+# it on change and deletes objects you remove from the file. Files vs
+# impctl is the same split as GitOps vs kubectl — pick one per object.
+#
+#   impctl apply -f examples/06-full-stack.yaml
+#   impctl get daemons
+#   impctl logs demo-web -f
+apiVersion: impd.sh/v1alpha1
+kind: Proc
+metadata:
+  name: demo-setup
+  labels:
+    app: demo
+    role: setup
+spec:
+  # One-shot initialization. imp has no cross-object ordering — objects
+  # are independent and reconciled level-triggered, so the web/worker
+  # processes must tolerate starting before setup finishes (retry, don't
+  # assume). Same posture as Kubernetes.
+  command: ["sh", "-c", "mkdir -p /var/tmp/demo && echo ready > /var/tmp/demo/state"]
+  restartPolicy: OnFailure
+---
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: demo-web
+  labels:
+    app: demo
+    role: web
+spec:
+  replicas: 1
+  updateStrategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: demo
+        role: web
+    spec:
+      command: ["python3", "-m", "http.server", "8080", "--directory", "/var/tmp/demo"]
+      workingDir: /var/tmp/demo
+      env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+      # user/group run the process as someone other than impd's own
+      # user. This is privileged: single-user installs (the default;
+      # see bootstrap/) reject any value other than the service user.
+      # Uncomment only on an install configured for multi-user Procs.
+      # user: www-data
+      # group: www-data
+      restartPolicy: Always
+      stopSignal: TERM
+      terminationGracePeriodSeconds: 10
+---
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: demo-worker
+  labels:
+    app: demo
+    role: worker
+spec:
+  replicas: 2
+  updateStrategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: demo
+        role: worker
+      annotations:
+        my.org/owner: platform-team
+    spec:
+      command:
+        - sh
+        - -c
+        - |
+          trap 'echo "finishing current job"; sleep 5; exit 0' TERM
+          while true; do echo "polling for work"; sleep 20; done
+      env:
+        - name: QUEUE_DIR
+          value: /var/tmp/demo
+      restartPolicy: Always
+      stopSignal: TERM
+      terminationGracePeriodSeconds: 30

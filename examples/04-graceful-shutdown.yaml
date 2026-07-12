@@ -1,0 +1,33 @@
+# 04 — Controlling how a process stops.
+#
+# When a Proc is deleted (directly, or because its Daemon scaled down,
+# updated, or was deleted), execd stops it in three steps:
+#
+#   1. send stopSignal              (default TERM)
+#   2. wait terminationGracePeriodSeconds   (default 30)
+#   3. SIGKILL anything still alive
+#
+# Tune both for processes that need a specific signal (nginx wants QUIT
+# for graceful stop) or need longer to drain (databases, job workers).
+#
+#   impctl apply -f examples/04-graceful-shutdown.yaml
+#   impctl delete daemon slow-drainer     # then watch it take its time
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: slow-drainer
+spec:
+  template:
+    spec:
+      # This script traps the stop signal and drains for 20s before
+      # exiting — comfortably inside the 60s grace period, so it always
+      # gets a clean shutdown and never sees SIGKILL.
+      command:
+        - sh
+        - -c
+        - |
+          trap 'echo draining...; sleep 20; echo drained; exit 0' INT
+          while true; do echo working; sleep 5; done
+      # Signal names are accepted with or without the SIG prefix.
+      stopSignal: INT
+      terminationGracePeriodSeconds: 60

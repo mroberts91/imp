@@ -1,0 +1,25 @@
+# 03 — Environment variables and working directory.
+#
+# env is a list (not a map) so ordering is explicit and stable. workingDir
+# is the process's cwd; relative paths in the command resolve against it.
+#
+#   impctl apply -f examples/03-env-and-workdir.yaml
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: env-demo
+spec:
+  template:
+    spec:
+      workingDir: /var/tmp
+      env:
+        - name: GREETING
+          value: hello
+        - name: LISTEN_ADDR
+          value: 127.0.0.1:9090
+        # An EnvVar with no value sets the variable to the empty string.
+        - name: DEBUG
+      # $GREETING is expanded by the shell we launch, not by imp — imp
+      # never interprets your command, it only execs it. If you don't
+      # need expansion, skip the shell and exec the binary directly.
+      command: ["sh", "-c", "while true; do echo \"$GREETING from $PWD\"; sleep 10; done"]

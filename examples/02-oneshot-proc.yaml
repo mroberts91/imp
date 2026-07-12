@@ -1,0 +1,26 @@
+# 02 — A bare Proc: one process, no Daemon managing it.
+#
+# A Proc is imp's primitive — one supervised process instance. Daemons
+# create Procs for you (that's almost always what you want), but you can
+# author one directly for a one-shot task, the same way you'd run a bare
+# Pod in Kubernetes.
+#
+# Two things distinguish a bare Proc from a Daemon's Proc:
+#   - Nothing recreates it: no owner, no replica management, no updates.
+#   - Its spec is immutable. To change anything, delete it and apply a
+#     new one:  impctl delete proc backup-once
+#
+#   impctl apply -f examples/02-oneshot-proc.yaml
+#   impctl get procs
+#   impctl logs backup-once
+apiVersion: impd.sh/v1alpha1
+kind: Proc
+metadata:
+  name: backup-once
+spec:
+  command: ["tar", "-czf", "/var/tmp/imp-backup.tgz", "/var/tmp/imp-data"]
+  # restartPolicy is the field that makes one-shots work:
+  #   Always    — restart on any exit (the default; wrong for a task)
+  #   OnFailure — restart only on non-zero exit; a clean exit stays done
+  #   Never     — run once, keep the result, never restart
+  restartPolicy: OnFailure

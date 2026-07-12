@@ -47,7 +47,7 @@ the access model.`,
 }
 
 func resolveKindArg(arg string) (string, error) {
-	switch strings.ToLower(arg) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
 	case "daemon", "daemons":
 		return v1alpha1.KindDaemon, nil
 	case "proc", "procs":

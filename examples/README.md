@@ -7,10 +7,8 @@ toward it — restarts, replicas, updates, and cleanup included.
 The examples here are a tutorial. Each file is self-contained and commented;
 read them in order.
 
-> **Status:** imp is mid-M1. `impctl apply` / `get` / `delete` and the
-> manifest directory work today; the controllers and execd that turn Daemons
-> into Procs and Procs into running processes are the next build steps, so
-> the "watch it run" parts below describe the intended behavior.
+> **Status:** M1 (“it runs things”) is complete. Controllers expand Daemons into
+> Procs; execd starts and restarts them. Try the “watch it run” commands below.
 
 ## Setup
 
@@ -61,11 +59,12 @@ impctl delete daemon hello # cascades: owned Procs are stopped and removed
 objects; you own their lifecycle and delete them yourself.
 
 **The manifest directory** (declarative, like static pods / GitOps): drop
-files into `$IMP_CONFIG_DIR/manifests/` (`--manifest-dir`). impd watches the
-directory and keeps the store in sync — edit a file and it's re-applied,
-delete a file (or a document from it) and the objects it declared are
-deleted. Objects synced this way are annotated `impd.sh/managed-by:
-manifest`; don't fight the watcher by editing them with impctl.
+files into the directory passed as `--manifest-dir` (system installs use
+`/etc/imp/manifests/`). impd watches the directory and keeps the store in
+sync — edit a file and it's re-applied, delete a file (or a document from it)
+and the objects it declared are deleted. Objects synced this way are
+annotated `impd.sh/managed-by: manifest`; don't fight the watcher by editing
+them with impctl.
 
 ## Rules worth knowing before you write your own
 

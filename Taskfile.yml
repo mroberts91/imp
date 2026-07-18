@@ -140,6 +140,15 @@ tasks:
       - IMP_SOCKET="${XDG_RUNTIME_DIR:-/tmp/imp-$(id -u)}/imp/impd.sock" bin/impctl {{.CLI_ARGS}}
     platforms: [linux, darwin]
 
+  # ---- Acceptance ----
+
+  accept:m1:
+    desc: Rootless M1 acceptance (manifest GitOps → Running → logs → kill-9 backoff → sweep → SIGTERM)
+    deps: [build]
+    cmds:
+      - bash scripts/m1-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

@@ -28,9 +28,16 @@ command_args="--socket ${IMP_SOCKET} --data-dir ${IMP_DATA_DIR} --manifest-dir $
 # Drop privileges to the unprivileged service user (single-user model).
 command_user="${IMP_USER}:${IMP_GROUP}"
 
-# Let OpenRC daemonize impd and track it by pidfile.
-command_background="yes"
-pidfile="/run/imp.pid"
+# Supervise impd with supervise-daemon so a crash respawns it. impd's panic
+# policy is crash-only (doc 05 §3): unexpected panics kill the process on
+# purpose and rely on the supervisor to restart it. Mirrors systemd's
+# Restart=on-failure + RestartSec=2s; give up after 5 respawns in 60s so a
+# broken config doesn't spin forever. supervise-daemon manages its own
+# pidfile and backgrounding - no command_background/pidfile here.
+supervisor="supervise-daemon"
+respawn_delay=2
+respawn_max=5
+respawn_period=60
 
 # impd logs JSON to stderr; under systemd journald would catch it, here we
 # redirect it to a file. (No rotation is set up - pair with logrotate if the
@@ -55,7 +62,7 @@ start_pre() {
     # systemd's RuntimeDirectory=.
     checkpath --directory --mode 0750 \
         --owner "${IMP_USER}:${IMP_GROUP}" "${IMP_RUN_DIR}"
-    # The log file must be writable by the service user before start-stop-daemon
+    # The log file must be writable by the service user before supervise-daemon
     # redirects into it.
     checkpath --file --mode 0640 \
         --owner "${IMP_USER}:${IMP_GROUP}" "${IMP_LOG_FILE}"

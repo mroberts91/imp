@@ -12,15 +12,18 @@
 // staging/src/k8s.io/sample-controller/controller.go; ordinal management
 // (fill the lowest free replica indices on scale-up, retire the highest
 // ordinals first on scale-down) is the monotonic-identity instinct of
-// pkg/controller/statefulset/stateful_set_control.go; the condition
+// pkg/controller/statefulset/stateful_set_control.go; RollingUpdate
+// (one ordinal at a time, high→low, wait for Ready, optional partition)
+// forks the rolling loop in that same file (~709–735); the condition
 // vocabulary and set-condition semantics are forked from
 // pkg/controller/deployment/util/deployment_util.go (see api/v1alpha1
 // conditions helpers). Deltas: owned Procs are matched by the
-// impd.sh/daemon-name label rather than a selector; the only update
-// strategy is Recreate (delete every stale-template Proc, requeue, create
-// replacements on a later pass); no expectations machinery and no
-// SlowStartBatch - the informer-backed cache plus level-triggered requeues
-// carry convergence; events go through internal/recorder.
+// impd.sh/daemon-name label rather than a selector; Recreate deletes every
+// stale-template Proc then requeues; RollingUpdate never surges (delete-
+// then-create per ordinal — even though hash-suffixed names could
+// coexist); no expectations machinery and no SlowStartBatch - the
+// informer-backed cache plus level-triggered requeues carry convergence;
+// events go through internal/recorder.
 package daemon
 
 import (
@@ -49,9 +52,9 @@ const componentName = "daemon-controller"
 // ReportingComponent is stamped on Events emitted by this controller.
 const ReportingComponent = "controllers/daemon"
 
-// recreateDelay spaces the passes of a Recreate rollout: pass one deletes
-// the stale Procs and schedules pass two, which creates the replacements.
-// Converge in passes; never block inside a reconcile.
+// recreateDelay spaces the passes of a Recreate or RollingUpdate step:
+// pass one deletes stale Proc(s) and schedules the next pass, which
+// creates replacements. Converge in passes; never block inside a reconcile.
 const recreateDelay = 1 * time.Second
 
 // Controller reconciles Daemons: it owns the Daemon -> Procs expansion and
@@ -89,7 +92,7 @@ func New(cl *client.Client, daemons, procs *cache.Store, clk clock.Clock, rec *r
 }
 
 // Reconcile converges the Daemon named by key ("Daemon/<name>") toward its
-// spec: retire stale-template Procs (Recreate strategy), then create or
+// spec: retire stale-template Procs per updateStrategy, then create or
 // delete Procs to match spec.replicas, then roll observed state up into
 // status. Everything is computed from the cache as observed at the start
 // of the pass; convergence happens across passes as Proc events re-enqueue
@@ -107,43 +110,173 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 
 	hash := v1alpha1.HashProcTemplate(&d.Spec.Template)
 	current, stale := c.observedProcs(d.Metadata.Name, hash)
-
-	// Recreate strategy: every stale-template Proc goes before any
-	// replacement is created. Replacements arrive on the requeued pass.
-	if len(stale) > 0 {
-		var errs []error
-		for i := range stale {
-			name := stale[i].Metadata.Name
-			if err := c.client.DeleteProc(ctx, name); err != nil && !errors.Is(err, v1alpha1.ErrNotFound) {
-				errs = append(errs, fmt.Errorf("deleting stale proc %s: %w", name, err))
-			}
-		}
-		if err := errors.Join(errs...); err != nil {
-			return err
-		}
-		c.emit(ctx, &d, v1alpha1.ReasonTemplateChanged,
-			fmt.Sprintf("template hash changed to %s, deleted %d stale proc(s)", hash, len(stale)))
-		if err := c.rollupStatus(ctx, &d, current, stale); err != nil {
-			return err
-		}
-		return controllers.RequeueAfter{After: recreateDelay}
-	}
-
+	partition := rollingPartition(&d)
 	// Daemons read from the server are always defaulted: Replicas is
 	// non-nil.
 	replicas := int(*d.Spec.Replicas)
-	switch {
-	case len(current) < replicas:
-		if err := c.scaleUp(ctx, &d, current, hash, replicas); err != nil {
+
+	switch d.Spec.UpdateStrategy.Type {
+	case v1alpha1.UpdateStrategyRollingUpdate:
+		// Fill holes before deleting more stale ordinals (StatefulSet
+		// order: create missing at the update revision, then roll).
+		created, err := c.scaleUp(ctx, &d, current, stale, hash, replicas)
+		if err != nil {
 			return err
 		}
-	case len(current) > replicas:
-		if err := c.scaleDown(ctx, &d, current, replicas); err != nil {
+		if created > 0 {
+			// One action per pass. The informer has not observed the new
+			// Procs yet, so walking the roll now would see their ordinals
+			// as empty slots and delete a second stale ordinal — two
+			// replicas down at once. The created Procs' own watch events
+			// re-enqueue this Daemon; the next pass sees them as current
+			// and waits for Ready.
+			return c.rollupStatus(ctx, &d, current, stale, partition)
+		}
+		done, err := c.rollingUpdate(ctx, &d, current, stale, hash, partition)
+		if err != nil {
+			return err
+		}
+		if !done {
+			return nil
+		}
+		if len(current)+len(stale) > replicas {
+			if err := c.scaleDown(ctx, &d, current, stale, replicas); err != nil {
+				return err
+			}
+		}
+		return c.rollupStatus(ctx, &d, current, stale, partition)
+	default:
+		// Recreate (default): every stale-template Proc goes before any
+		// replacement is created. Replacements arrive on the requeued pass.
+		if len(stale) > 0 {
+			var errs []error
+			deleted := 0
+			for i := range stale {
+				name := stale[i].Metadata.Name
+				switch err := c.client.DeleteProc(ctx, name); {
+				case err == nil:
+					deleted++
+				case !errors.Is(err, v1alpha1.ErrNotFound):
+					// ErrNotFound is cache lag from a prior pass: the Proc
+					// is already gone and must not be reported as deleted.
+					errs = append(errs, fmt.Errorf("deleting stale proc %s: %w", name, err))
+				}
+			}
+			if err := errors.Join(errs...); err != nil {
+				return err
+			}
+			if deleted > 0 {
+				c.emit(ctx, &d, v1alpha1.ReasonTemplateChanged,
+					fmt.Sprintf("template hash changed to %s, deleted %d stale proc(s)", hash, deleted))
+			}
+			if err := c.rollupStatus(ctx, &d, current, stale, partition); err != nil {
+				return err
+			}
+			return controllers.RequeueAfter{After: recreateDelay}
+		}
+	}
+
+	switch {
+	case len(current) < replicas:
+		if _, err := c.scaleUp(ctx, &d, current, stale, hash, replicas); err != nil {
+			return err
+		}
+	case len(current)+len(stale) > replicas:
+		if err := c.scaleDown(ctx, &d, current, stale, replicas); err != nil {
 			return err
 		}
 	}
 
-	return c.rollupStatus(ctx, &d, current, stale)
+	return c.rollupStatus(ctx, &d, current, stale, partition)
+}
+
+// rollingPartition returns the RollingUpdate partition (0 when unset /
+// Recreate).
+func rollingPartition(d *v1alpha1.Daemon) int {
+	if d.Spec.UpdateStrategy.Type != v1alpha1.UpdateStrategyRollingUpdate {
+		return 0
+	}
+	if ru := d.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil {
+		return int(*ru.Partition)
+	}
+	return 0
+}
+
+// rollingUpdate performs one step of a StatefulSet-style roll: walk
+// ordinals high→low from replicas-1 down to partition; wait if a higher
+// ordinal's Proc is not Ready (or its slot state is unknown); delete at
+// most one stale Proc per call. done is true when no rolling work remains
+// for this pass (caller may scale). When done is false the status has
+// already been rolled up.
+func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, hash string, partition int) (done bool, err error) {
+	replicas := int(*d.Spec.Replicas)
+	byIndex := indexProcs(current, stale)
+
+	for idx := replicas - 1; idx >= partition; idx-- {
+		slot := byIndex[idx]
+		switch {
+		case slot.current != nil && !procReady(slot.current):
+			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
+				return false, err
+			}
+			return false, nil
+		case slot.current == nil && slot.stale == nil:
+			// Empty slot: a replacement created by an earlier pass that the
+			// informer has not observed yet (the caller fills genuine holes
+			// before walking), or a malformed replica-index label. Never
+			// roll past an ordinal whose state is unknown — treat it like a
+			// not-Ready Proc and wait for the cache to catch up.
+			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
+				return false, err
+			}
+			return false, nil
+		case slot.stale != nil:
+			name := slot.stale.Metadata.Name
+			switch err := c.client.DeleteProc(ctx, name); {
+			case errors.Is(err, v1alpha1.ErrNotFound):
+				// Already gone (cache lag from a prior pass): nothing was
+				// deleted this pass, so no event.
+			case err != nil:
+				return false, fmt.Errorf("deleting stale proc %s: %w", name, err)
+			default:
+				c.emit(ctx, d, v1alpha1.ReasonTemplateChanged,
+					fmt.Sprintf("rolling update to hash %s: deleted stale proc %s (ordinal %d)", hash, name, idx))
+			}
+			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
+				return false, err
+			}
+			return false, controllers.RequeueAfter{After: recreateDelay}
+		}
+	}
+	return true, nil
+}
+
+type procSlot struct {
+	current *v1alpha1.Proc
+	stale   *v1alpha1.Proc
+}
+
+func indexProcs(current, stale []v1alpha1.Proc) map[int]procSlot {
+	out := make(map[int]procSlot)
+	for i := range current {
+		idx, err := strconv.Atoi(current[i].Metadata.Labels[v1alpha1.LabelReplicaIndex])
+		if err != nil {
+			continue
+		}
+		s := out[idx]
+		s.current = &current[i]
+		out[idx] = s
+	}
+	for i := range stale {
+		idx, err := strconv.Atoi(stale[i].Metadata.Labels[v1alpha1.LabelReplicaIndex])
+		if err != nil {
+			continue
+		}
+		s := out[idx]
+		s.stale = &stale[i]
+		out[idx] = s
+	}
+	return out
 }
 
 // observedProcs scans the proc store for Procs labeled with the daemon's
@@ -170,11 +303,19 @@ func (c *Controller) observedProcs(daemonName, hash string) (current, stale []v1
 }
 
 // scaleUp creates a Proc for every free replica index in [0, replicas),
-// lowest first, so identities stay monotonic and stable.
-func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current []v1alpha1.Proc, hash string, replicas int) error {
-	used := make(map[int]bool, len(current))
+// lowest first, so identities stay monotonic and stable. Indices that
+// still hold a stale Proc are skipped (RollingUpdate delete-then-create).
+// Returns how many Procs were created, so the RollingUpdate path can stop
+// after a creation pass instead of trusting the (still-lagging) cache.
+func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, hash string, replicas int) (int, error) {
+	used := make(map[int]bool, len(current)+len(stale))
 	for i := range current {
 		if idx, ok := c.replicaIndex(&current[i]); ok {
+			used[idx] = true
+		}
+	}
+	for i := range stale {
+		if idx, ok := c.replicaIndex(&stale[i]); ok {
 			used[idx] = true
 		}
 	}
@@ -188,45 +329,61 @@ func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current []
 		if _, err := c.client.ApplyProc(ctx, p); err != nil {
 			// Includes ErrInvalid from a same-name-different-spec
 			// collision: a real error, surfaced for backoff.
-			return fmt.Errorf("creating proc %s: %w", p.Metadata.Name, err)
+			return len(created), fmt.Errorf("creating proc %s: %w", p.Metadata.Name, err)
 		}
 		created = append(created, p.Metadata.Name)
 	}
 
-	if len(current) == 0 {
+	switch {
+	case len(current) == 0 && len(stale) == 0:
 		// First creation: the Daemon is being expanded for the first
 		// time (or after a Recreate rollout), not scaled.
 		for _, name := range created {
 			c.emit(ctx, d, v1alpha1.ReasonCreated, "created proc "+name)
 		}
-	} else if len(created) > 0 {
+	case len(stale) > 0 && len(created) > 0:
+		// Stale Procs present means a roll is in flight: these creations
+		// are rolling replacements, not a scale change.
+		for _, name := range created {
+			c.emit(ctx, d, v1alpha1.ReasonTemplateChanged,
+				fmt.Sprintf("rolling update to hash %s: created proc %s", hash, name))
+		}
+	case len(created) > 0:
 		c.emit(ctx, d, v1alpha1.ReasonScalingReplicas,
 			fmt.Sprintf("scaled up: created %d proc(s) toward %d replicas", len(created), replicas))
 	}
-	return nil
+	return len(created), nil
 }
 
 // scaleDown deletes surplus Procs, highest ordinals first. A Proc with a
 // malformed replica-index label sorts above every well-formed ordinal, so
-// anomalous Procs are retired first.
-func (c *Controller) scaleDown(ctx context.Context, d *v1alpha1.Daemon, current []v1alpha1.Proc, replicas int) error {
+// anomalous Procs are retired first. Considers current and stale together
+// so a RollingUpdate mid-roll does not leave surplus stale ordinals.
+func (c *Controller) scaleDown(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, replicas int) error {
 	type ordinal struct {
 		name  string
 		index int
 	}
-	ordinals := make([]ordinal, 0, len(current))
-	for i := range current {
-		idx, ok := c.replicaIndex(&current[i])
+	all := make([]v1alpha1.Proc, 0, len(current)+len(stale))
+	all = append(all, current...)
+	all = append(all, stale...)
+	ordinals := make([]ordinal, 0, len(all))
+	for i := range all {
+		idx, ok := c.replicaIndex(&all[i])
 		if !ok {
 			idx = math.MaxInt
 		}
-		ordinals = append(ordinals, ordinal{name: current[i].Metadata.Name, index: idx})
+		ordinals = append(ordinals, ordinal{name: all[i].Metadata.Name, index: idx})
 	}
 	slices.SortFunc(ordinals, func(a, b ordinal) int { return cmp.Compare(b.index, a.index) })
 
+	surplus := len(all) - replicas
+	if surplus <= 0 {
+		return nil
+	}
 	var errs []error
 	deleted := 0
-	for _, o := range ordinals[:len(current)-replicas] {
+	for _, o := range ordinals[:surplus] {
 		if err := c.client.DeleteProc(ctx, o.name); err != nil && !errors.Is(err, v1alpha1.ErrNotFound) {
 			errs = append(errs, fmt.Errorf("deleting proc %s: %w", o.name, err))
 			continue
@@ -294,7 +451,9 @@ const (
 // rollupStatus writes the Daemon's status from the Proc set observed at
 // the start of the pass. The write is unconditional: etcl's no-op
 // short-circuit absorbs identical bodies with zero resourceVersion churn.
-func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc) error {
+// partition gates Progressing completion under RollingUpdate (stale below
+// partition is intentional).
+func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, partition int) error {
 	name := d.Metadata.Name
 	gen := d.Metadata.Generation
 	replicas := *d.Spec.Replicas
@@ -336,15 +495,31 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 		ObservedGeneration: gen,
 		LastTransitionTime: now,
 	}
-	if len(stale) == 0 && updated == replicas && ready == replicas {
+	if rolloutComplete(current, stale, int(replicas), partition) {
 		prog.Reason = reasonProcsAvailable
 		prog.Message = "all procs are updated and available"
+		if len(stale) > 0 {
+			// Complete with stale Procs only happens under a partition:
+			// ordinals below it are intentionally left on the old hash.
+			// Do not claim "all procs are updated" when they are not.
+			prog.Message = fmt.Sprintf("ordinals >= %d are updated and available (%d proc(s) below the partition remain on the old hash)",
+				partition, len(stale))
+		}
 	}
 
 	err := client.RetryOnConflict(func() error {
 		fresh, err := c.client.GetDaemon(ctx, name)
 		if err != nil {
 			return err
+		}
+		if fresh.Metadata.UID != d.Metadata.UID {
+			// The Daemon was deleted and recreated under the same name
+			// mid-pass. This pass's observation belongs to the dead
+			// incarnation; writing it would stamp the new object with
+			// another object's counts and an observedGeneration its own
+			// generation may never have reached. The new incarnation's
+			// watch events drive fresh reconciles.
+			return nil
 		}
 		fresh.Status.ObservedGeneration = gen
 		fresh.Status.Replicas = total
@@ -363,6 +538,34 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 		return fmt.Errorf("updating status of %s/%s: %w", v1alpha1.KindDaemon, name, err)
 	}
 	return nil
+}
+
+// rolloutComplete reports whether every ordinal in [partition, replicas)
+// has a current-hash Ready Proc, and there is no stale Proc at those
+// ordinals. Stale Procs below partition are intentional under RollingUpdate.
+func rolloutComplete(current, stale []v1alpha1.Proc, replicas, partition int) bool {
+	if replicas == 0 {
+		return len(current) == 0 && len(stale) == 0
+	}
+	byIndex := indexProcs(current, stale)
+	for idx := partition; idx < replicas; idx++ {
+		slot := byIndex[idx]
+		if slot.stale != nil || slot.current == nil || !procReady(slot.current) {
+			return false
+		}
+	}
+	// No surplus stale at ordinals >= partition (scale should have cleared
+	// ordinals >= replicas; anything still stale in the roll range fails).
+	for i := range stale {
+		idx, err := strconv.Atoi(stale[i].Metadata.Labels[v1alpha1.LabelReplicaIndex])
+		if err != nil {
+			return false
+		}
+		if idx >= partition {
+			return false
+		}
+	}
+	return true
 }
 
 // procReady reports whether p should count toward readyReplicas: Ready

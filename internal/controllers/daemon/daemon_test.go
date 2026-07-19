@@ -463,3 +463,404 @@ func TestReconcileAbsentDaemonIsNil(t *testing.T) {
 		t.Fatalf("Reconcile of absent daemon = %v, want nil", err)
 	}
 }
+
+func applyDaemonOpts(t *testing.T, h *harness, replicas int32, strategy v1alpha1.UpdateStrategy) *v1alpha1.Daemon {
+	t.Helper()
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: "web"},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas:       new(replicas),
+			UpdateStrategy: strategy,
+			Template: v1alpha1.ProcTemplate{
+				Metadata: v1alpha1.TemplateMeta{
+					Labels: map[string]string{"app": "web"},
+				},
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}},
+			},
+		},
+	}
+	applied, err := h.cl.ApplyDaemon(t.Context(), d)
+	if err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	return applied
+}
+
+func markProcsReady(t *testing.T, h *harness, names ...string) {
+	t.Helper()
+	ctx := t.Context()
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
+	procs, _, err := h.cl.ListProcs(ctx)
+	if err != nil {
+		t.Fatalf("ListProcs: %v", err)
+	}
+	for i := range procs {
+		p := &procs[i]
+		if len(want) > 0 && !want[p.Metadata.Name] {
+			continue
+		}
+		p.Status.Phase = v1alpha1.ProcPhaseRunning
+		v1alpha1.SetStatusCondition(&p.Status.Conditions, v1alpha1.Condition{
+			Type:   v1alpha1.ConditionTypeReady,
+			Status: v1alpha1.ConditionTrue,
+			Reason: "TestReady",
+		})
+		if _, err := h.cl.UpdateProcStatus(ctx, p); err != nil {
+			t.Fatalf("UpdateProcStatus(%s): %v", p.Metadata.Name, err)
+		}
+	}
+	h.waitCaughtUp(t)
+}
+
+func TestReconcileRollingUpdateSequential(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemonOpts(t, h, 3, v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRollingUpdate})
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	procs := listProcsSorted(t, h)
+	if len(procs) != 3 {
+		t.Fatalf("got %d procs, want 3", len(procs))
+	}
+	markProcsReady(t, h) // all
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	oldHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+
+	d.Spec.Template.Spec.Command = []string{"/bin/sleep", "120"}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon(template change): %v", err)
+	}
+	h.waitCaughtUp(t)
+
+	// Pass 1: delete highest ordinal only; lower stale procs remain.
+	err = h.c.Reconcile(ctx, "Daemon/web")
+	var requeue controllers.RequeueAfter
+	if !errors.As(err, &requeue) {
+		t.Fatalf("Reconcile after template change returned %v, want RequeueAfter", err)
+	}
+	h.waitCaughtUp(t)
+	procs = listProcsSorted(t, h)
+	if len(procs) != 2 {
+		t.Fatalf("after first rolling delete got %d procs, want 2", len(procs))
+	}
+	for _, p := range procs {
+		idx := p.Metadata.Labels[v1alpha1.LabelReplicaIndex]
+		if idx == "2" {
+			t.Fatalf("ordinal 2 still present after first rolling delete: %s", p.Metadata.Name)
+		}
+		if p.Metadata.Labels[v1alpha1.LabelTemplateHash] != oldHash {
+			t.Errorf("unexpected hash on remaining proc %s", p.Metadata.Name)
+		}
+	}
+	if findEvent(t, h, v1alpha1.ReasonTemplateChanged) == nil {
+		t.Error("no TemplateChanged event recorded")
+	}
+
+	// Pass 2: create replacement at ordinal 2; do not delete ordinal 1 yet
+	// because the new ordinal-2 Proc is not Ready.
+	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+		t.Fatalf("Reconcile create replacement: %v", err)
+	}
+	h.waitCaughtUp(t)
+	d, err = h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	newHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	procs = listProcsSorted(t, h)
+	var new2, stale1 bool
+	for _, p := range procs {
+		idx := p.Metadata.Labels[v1alpha1.LabelReplicaIndex]
+		hash := p.Metadata.Labels[v1alpha1.LabelTemplateHash]
+		switch {
+		case idx == "2" && hash == newHash:
+			new2 = true
+		case idx == "1" && hash == oldHash:
+			stale1 = true
+		case idx == "1" && hash == newHash:
+			t.Fatalf("ordinal 1 already rolled while ordinal 2 not Ready: %s", p.Metadata.Name)
+		}
+	}
+	if !new2 || !stale1 {
+		t.Fatalf("after create pass: new2=%v stale1=%v procs=%v", new2, stale1, procNames(procs))
+	}
+
+	// Mark only the new ordinal-2 Ready; next pass may delete ordinal 1.
+	markProcsReady(t, h, "web-2-"+newHash)
+	err = h.c.Reconcile(ctx, "Daemon/web")
+	if !errors.As(err, &requeue) {
+		t.Fatalf("Reconcile after Ready returned %v, want RequeueAfter (delete ordinal 1)", err)
+	}
+	h.waitCaughtUp(t)
+	for _, p := range listProcsSorted(t, h) {
+		if p.Metadata.Labels[v1alpha1.LabelReplicaIndex] == "1" &&
+			p.Metadata.Labels[v1alpha1.LabelTemplateHash] == oldHash {
+			t.Fatalf("stale ordinal 1 still present after its rolling delete")
+		}
+	}
+
+	// Drive to completion: create, mark Ready, roll next ordinal.
+	for range 15 {
+		h.waitCaughtUp(t)
+		err := h.c.Reconcile(ctx, "Daemon/web")
+		var rq controllers.RequeueAfter
+		if errors.As(err, &rq) {
+			h.waitCaughtUp(t)
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		h.waitCaughtUp(t)
+		markProcsReady(t, h)
+		d, err := h.cl.GetDaemon(ctx, "web")
+		if err != nil {
+			t.Fatalf("GetDaemon: %v", err)
+		}
+		procs = listProcsSorted(t, h)
+		if len(procs) != 3 || d.Status.UpdatedReplicas != 3 || d.Status.ReadyReplicas != 3 {
+			continue
+		}
+		allNew := true
+		for _, p := range procs {
+			if p.Metadata.Labels[v1alpha1.LabelTemplateHash] != newHash || !procReady(&p) {
+				allNew = false
+				break
+			}
+		}
+		if !allNew {
+			continue
+		}
+		// One more pass so rollup sees Ready.
+		if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+			var rq2 controllers.RequeueAfter
+			if !errors.As(err, &rq2) {
+				t.Fatalf("final Reconcile: %v", err)
+			}
+		}
+		h.waitCaughtUp(t)
+		d, err = h.cl.GetDaemon(ctx, "web")
+		if err != nil {
+			t.Fatalf("GetDaemon: %v", err)
+		}
+		prog := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeProgressing)
+		if prog == nil || prog.Reason != reasonProcsAvailable {
+			t.Fatalf("Progressing = %+v, want Reason=%s", prog, reasonProcsAvailable)
+		}
+		return
+	}
+	t.Fatalf("rolling update did not complete; procs=%v", procNames(listProcsSorted(t, h)))
+}
+
+func TestReconcileRollingUpdatePartition(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemonOpts(t, h, 3, v1alpha1.UpdateStrategy{
+		Type:          v1alpha1.UpdateStrategyRollingUpdate,
+		RollingUpdate: &v1alpha1.RollingUpdateDaemonStrategy{Partition: new(int32(1))},
+	})
+	h.reconcileUntilSteady(t, "Daemon/web")
+	markProcsReady(t, h)
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	oldHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+
+	d.Spec.Template.Spec.Command = []string{"/bin/sleep", "90"}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+
+	// Drive roll for ordinals >= 1 only.
+	for range 20 {
+		h.waitCaughtUp(t)
+		err := h.c.Reconcile(ctx, "Daemon/web")
+		var rq controllers.RequeueAfter
+		if errors.As(err, &rq) {
+			continue
+		}
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		h.waitCaughtUp(t)
+		markProcsReady(t, h)
+	}
+	h.waitCaughtUp(t)
+	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+		var rq controllers.RequeueAfter
+		if !errors.As(err, &rq) {
+			t.Fatalf("final Reconcile: %v", err)
+		}
+	}
+	h.waitCaughtUp(t)
+
+	d, err = h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	newHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	procs := listProcsSorted(t, h)
+	if len(procs) != 3 {
+		t.Fatalf("got %d procs, want 3", len(procs))
+	}
+	for _, p := range procs {
+		idx := p.Metadata.Labels[v1alpha1.LabelReplicaIndex]
+		hash := p.Metadata.Labels[v1alpha1.LabelTemplateHash]
+		switch idx {
+		case "0":
+			if hash != oldHash {
+				t.Errorf("ordinal 0 hash = %s, want old %s (partition)", hash, oldHash)
+			}
+		case "1", "2":
+			if hash != newHash {
+				t.Errorf("ordinal %s hash = %s, want new %s", idx, hash, newHash)
+			}
+		}
+	}
+	prog := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeProgressing)
+	if prog == nil || prog.Reason != reasonProcsAvailable {
+		t.Fatalf("Progressing = %+v, want complete with partition holding ordinal 0", prog)
+	}
+}
+
+func procNames(procs []v1alpha1.Proc) []string {
+	out := make([]string, len(procs))
+	for i := range procs {
+		out[i] = procs[i].Metadata.Name
+	}
+	return out
+}
+
+// A rolling pass that creates replacement Procs must stop there: the
+// informer has not observed the creations yet, so continuing into the
+// rolling walk would see their ordinals as empty slots and delete a second
+// stale ordinal — two replicas down at once. Pins the one-action-per-pass
+// gate in the RollingUpdate branch.
+func TestReconcileRollingUpdateCreationPassDeletesNothing(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemonOpts(t, h, 3, v1alpha1.UpdateStrategy{Type: v1alpha1.UpdateStrategyRollingUpdate})
+	h.reconcileUntilSteady(t, "Daemon/web")
+	markProcsReady(t, h)
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	oldHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	d.Spec.Template.Spec.Command = []string{"/bin/sleep", "120"}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon(template change): %v", err)
+	}
+	h.waitCaughtUp(t)
+
+	// Pass 1 deletes ordinal 2 (highest stale).
+	err = h.c.Reconcile(ctx, "Daemon/web")
+	var requeue controllers.RequeueAfter
+	if !errors.As(err, &requeue) {
+		t.Fatalf("first rolling pass returned %v, want RequeueAfter", err)
+	}
+	h.waitCaughtUp(t)
+
+	// Pass 2 creates the ordinal-2 replacement. It must return nil (wait
+	// for the new Proc, no requeue-driven walk) and must not have deleted
+	// anything: both stale lower ordinals are still on the server,
+	// regardless of whether the informer observed the creation.
+	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+		t.Fatalf("creation pass returned %v, want nil", err)
+	}
+	procs := listProcsSorted(t, h)
+	if len(procs) != 3 {
+		t.Fatalf("after creation pass got %d procs, want 3 (no same-pass delete): %v",
+			len(procs), procNames(procs))
+	}
+	staleLeft := 0
+	for _, p := range procs {
+		if p.Metadata.Labels[v1alpha1.LabelTemplateHash] == oldHash {
+			staleLeft++
+		}
+	}
+	if staleLeft != 2 {
+		t.Fatalf("creation pass deleted a stale ordinal: %d stale procs left, want 2 (%v)",
+			staleLeft, procNames(procs))
+	}
+}
+
+// Scale-up must fill the lowest free replica index, not append past the
+// highest one (StatefulSet monotonic identity). Deleting the middle
+// ordinal and reconciling must recreate ordinal 1, never mint ordinal 3.
+func TestReconcileScaleUpFillsLowestFreeIndex(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemon(t, h, 3)
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	hash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	if err := h.cl.DeleteProc(ctx, "web-1-"+hash); err != nil {
+		t.Fatalf("DeleteProc(web-1): %v", err)
+	}
+	h.waitCaughtUp(t)
+
+	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	indices := map[string]bool{}
+	for _, p := range listProcsSorted(t, h) {
+		indices[p.Metadata.Labels[v1alpha1.LabelReplicaIndex]] = true
+	}
+	if !indices["1"] {
+		t.Errorf("gap at ordinal 1 was not refilled; indices = %v", indices)
+	}
+	if indices["3"] {
+		t.Errorf("scale-up appended ordinal 3 instead of filling the gap; indices = %v", indices)
+	}
+}
+
+// rollupStatus must never stamp a recreated Daemon (same name, new UID)
+// with the dead incarnation's observation: without the UID guard the write
+// would carry another object's counts and an observedGeneration the new
+// object's generation may never have reached.
+func TestRollupStatusSkipsRecreatedDaemon(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemon(t, h, 2)
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	old, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	if err := h.cl.DeleteDaemon(ctx, "web"); err != nil {
+		t.Fatalf("DeleteDaemon: %v", err)
+	}
+	fresh := applyDaemon(t, h, 2)
+	if fresh.Metadata.UID == old.Metadata.UID {
+		t.Fatalf("recreated daemon kept UID %s; cannot exercise the guard", old.Metadata.UID)
+	}
+
+	// Roll up with the dead incarnation's copy and a non-empty observation:
+	// must be a silent no-op against the new object.
+	if err := h.c.rollupStatus(ctx, old, []v1alpha1.Proc{{}, {}}, nil, 0); err != nil {
+		t.Fatalf("rollupStatus with stale incarnation: %v", err)
+	}
+	got, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon after rollup: %v", err)
+	}
+	if got.Status.ObservedGeneration != 0 || got.Status.Replicas != 0 || len(got.Status.Conditions) != 0 {
+		t.Fatalf("stale incarnation's status was written onto the new object: %+v", got.Status)
+	}
+}

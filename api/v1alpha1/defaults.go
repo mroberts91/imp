@@ -31,6 +31,14 @@ func DefaultDaemon(d *Daemon) {
 	if d.Spec.UpdateStrategy.Type == "" {
 		d.Spec.UpdateStrategy.Type = UpdateStrategyRecreate
 	}
+	if d.Spec.UpdateStrategy.Type == UpdateStrategyRollingUpdate {
+		if d.Spec.UpdateStrategy.RollingUpdate == nil {
+			d.Spec.UpdateStrategy.RollingUpdate = &RollingUpdateDaemonStrategy{}
+		}
+		if d.Spec.UpdateStrategy.RollingUpdate.Partition == nil {
+			d.Spec.UpdateStrategy.RollingUpdate.Partition = new(int32(0))
+		}
+	}
 	defaultProcTemplateSpec(&d.Spec.Template.Spec)
 }
 

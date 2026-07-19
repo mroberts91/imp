@@ -37,23 +37,53 @@ func TestSetStatusConditionAdds(t *testing.T) {
 	}
 }
 
-func TestSetStatusConditionNoOpOnSameStatusAndReason(t *testing.T) {
+func TestSetStatusConditionNoOpOnIdenticalCondition(t *testing.T) {
 	var conditions []Condition
 	t0 := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 
 	SetStatusCondition(&conditions, condAt(ConditionFalse, "A", t0))
-	later := condAt(ConditionFalse, "A", t0.Add(time.Hour))
-	later.Message = "a different message that must not be written"
-	if SetStatusCondition(&conditions, later) {
-		t.Error("same status+reason must be a full no-op (false)")
+	// Identical condition an hour later: full no-op, timestamp untouched.
+	if SetStatusCondition(&conditions, condAt(ConditionFalse, "A", t0.Add(time.Hour))) {
+		t.Error("identical condition must be a full no-op (false)")
 	}
 
 	got := FindStatusCondition(conditions, ConditionTypeAvailable)
-	if got.Message != "m-A" {
-		t.Errorf("message = %q; same status+reason must be a full no-op", got.Message)
-	}
 	if !got.LastTransitionTime.Equal(NewTime(t0)) {
 		t.Errorf("lastTransitionTime moved to %v on a no-op set", got.LastTransitionTime)
+	}
+	if len(conditions) != 1 {
+		t.Errorf("len(conditions) = %d, want 1", len(conditions))
+	}
+}
+
+func TestSetStatusConditionUpdatesMessageAndObservedGeneration(t *testing.T) {
+	var conditions []Condition
+	t0 := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	first := condAt(ConditionFalse, "A", t0)
+	first.ObservedGeneration = 1
+	SetStatusCondition(&conditions, first)
+
+	// Same Status and Reason, but the generation advanced and the message
+	// changed: both must be recorded in place, transition time preserved
+	// (apimachinery semantics — a frozen observedGeneration would contradict
+	// status.observedGeneration after a spec bump).
+	next := condAt(ConditionFalse, "A", t0.Add(time.Hour))
+	next.ObservedGeneration = 2
+	next.Message = "still waiting, new generation"
+	if !SetStatusCondition(&conditions, next) {
+		t.Fatal("observedGeneration/message change must update (true)")
+	}
+
+	got := FindStatusCondition(conditions, ConditionTypeAvailable)
+	if got.ObservedGeneration != 2 {
+		t.Errorf("observedGeneration = %d, want 2", got.ObservedGeneration)
+	}
+	if got.Message != "still waiting, new generation" {
+		t.Errorf("message = %q, want the updated message", got.Message)
+	}
+	if !got.LastTransitionTime.Equal(NewTime(t0)) {
+		t.Errorf("lastTransitionTime = %v, want original %v (status unchanged)", got.LastTransitionTime, t0)
 	}
 	if len(conditions) != 1 {
 		t.Errorf("len(conditions) = %d, want 1", len(conditions))

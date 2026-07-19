@@ -61,11 +61,29 @@ func ValidateDaemon(d *Daemon) ErrorList {
 		errs = append(errs, invalidErr(specPath.Child("replicas"), *d.Spec.Replicas, "must be greater than or equal to 0"))
 	}
 
-	if d.Spec.UpdateStrategy.Type != UpdateStrategyRecreate {
+	stratPath := specPath.Child("updateStrategy")
+	switch d.Spec.UpdateStrategy.Type {
+	case UpdateStrategyRecreate:
+		if d.Spec.UpdateStrategy.RollingUpdate != nil {
+			errs = append(errs, invalidErr(
+				stratPath.Child("rollingUpdate"),
+				d.Spec.UpdateStrategy.RollingUpdate,
+				"may only be set when type is RollingUpdate",
+			))
+		}
+	case UpdateStrategyRollingUpdate:
+		if ru := d.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil && *ru.Partition < 0 {
+			errs = append(errs, invalidErr(
+				stratPath.Child("rollingUpdate").Child("partition"),
+				*ru.Partition,
+				"must be greater than or equal to 0",
+			))
+		}
+	default:
 		errs = append(errs, notSupportedErr(
-			specPath.Child("updateStrategy").Child("type"),
+			stratPath.Child("type"),
 			d.Spec.UpdateStrategy.Type,
-			[]string{string(UpdateStrategyRecreate)},
+			[]string{string(UpdateStrategyRecreate), string(UpdateStrategyRollingUpdate)},
 		))
 	}
 

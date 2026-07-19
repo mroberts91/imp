@@ -129,6 +129,13 @@ func describeDaemon(w io.Writer, d *v1alpha1.Daemon, events []v1alpha1.Event) {
 	fmt.Fprintf(w, "\nReplicas:\t%d desired | %d updated | %d ready | %d total\n",
 		desired, d.Status.UpdatedReplicas, d.Status.ReadyReplicas, d.Status.Replicas)
 	fmt.Fprintf(w, "UpdateStrategy:\t%s\n", d.Spec.UpdateStrategy.Type)
+	if d.Spec.UpdateStrategy.Type == v1alpha1.UpdateStrategyRollingUpdate {
+		partition := int32(0)
+		if ru := d.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil {
+			partition = *ru.Partition
+		}
+		fmt.Fprintf(w, "  Partition:\t%d\n", partition)
+	}
 	fmt.Fprintf(w, "Command:\t%s\n", strings.Join(d.Spec.Template.Spec.Command, " "))
 	if d.Spec.Template.Spec.RestartPolicy != "" {
 		fmt.Fprintf(w, "RestartPolicy:\t%s\n", d.Spec.Template.Spec.RestartPolicy)

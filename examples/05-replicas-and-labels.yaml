@@ -7,11 +7,18 @@
 #   impd.sh/replica-index   — 0..N-1
 #   impd.sh/template-hash   — hash of the template that produced it
 #
+# execd also injects IMP_REPLICA_INDEX (and IMP_DAEMON / IMP_PROC) into
+# each child's environment. That is the only per-replica templating imp
+# offers (D2): interpolate yourself, e.g.
+#
+#   command: ["sh", "-c", "exec myapp --port=$((8000 + IMP_REPLICA_INDEX))"]
+#
 # The template-hash label is how updates work: Proc specs are immutable,
 # so editing this template never mutates a running Proc. Instead the
-# daemon controller sees Procs whose hash no longer matches, and — under
-# the Recreate strategy, the only one today — stops the old Procs and
-# creates new ones from the new template.
+# daemon controller sees Procs whose hash no longer matches and replaces
+# them. Recreate deletes every stale Proc then creates replacements;
+# RollingUpdate (see examples/07-rolling-update.yaml) replaces one
+# ordinal at a time, highest first, waiting for Ready between steps.
 #
 #   impctl apply -f examples/05-replicas-and-labels.yaml
 #   impctl get procs        # expect worker-0-<hash>, worker-1-<hash>, worker-2-<hash>
@@ -43,5 +50,5 @@ spec:
       command:
         - sh
         - -c
-        - while true; do echo "processing queue"; sleep 15; done
+        - while true; do echo "worker index=$IMP_REPLICA_INDEX"; sleep 15; done
       restartPolicy: Always

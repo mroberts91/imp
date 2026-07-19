@@ -32,6 +32,36 @@ func TestDefaultDaemon(t *testing.T) {
 	}
 }
 
+func TestDefaultDaemonRollingUpdate(t *testing.T) {
+	d := &Daemon{
+		Metadata: ObjectMeta{Name: "web"},
+		Spec: DaemonSpec{
+			UpdateStrategy: UpdateStrategy{Type: UpdateStrategyRollingUpdate},
+			Template:       ProcTemplate{Spec: ProcTemplateSpec{Command: []string{"/bin/true"}}},
+		},
+	}
+	DefaultDaemon(d)
+	ru := d.Spec.UpdateStrategy.RollingUpdate
+	if ru == nil || ru.Partition == nil || *ru.Partition != 0 {
+		t.Errorf("RollingUpdate = %+v, want partition 0", ru)
+	}
+
+	d2 := &Daemon{
+		Metadata: ObjectMeta{Name: "web"},
+		Spec: DaemonSpec{
+			UpdateStrategy: UpdateStrategy{
+				Type:          UpdateStrategyRollingUpdate,
+				RollingUpdate: &RollingUpdateDaemonStrategy{Partition: new(int32(2))},
+			},
+			Template: ProcTemplate{Spec: ProcTemplateSpec{Command: []string{"/bin/true"}}},
+		},
+	}
+	DefaultDaemon(d2)
+	if *d2.Spec.UpdateStrategy.RollingUpdate.Partition != 2 {
+		t.Errorf("explicit partition overwritten to %d", *d2.Spec.UpdateStrategy.RollingUpdate.Partition)
+	}
+}
+
 func TestDefaultDaemonPreservesSetValues(t *testing.T) {
 	d := &Daemon{
 		Metadata: ObjectMeta{Name: "web"},

@@ -7,8 +7,9 @@ toward it — restarts, replicas, updates, and cleanup included.
 The examples here are a tutorial. Each file is self-contained and commented;
 read them in order.
 
-> **Status:** M1 (“it runs things”) is complete. Controllers expand Daemons into
-> Procs; execd starts and restarts them. Try the “watch it run” commands below.
+> **Status:** M1–M4 are complete. Controllers expand Daemons into Procs;
+> execd starts and restarts them; RollingUpdate and `IMP_REPLICA_INDEX` work.
+> Try the “watch it run” commands below.
 
 ## Setup
 
@@ -40,8 +41,9 @@ events`); you never author it.
 | Basic | [`02-oneshot-proc.yaml`](02-oneshot-proc.yaml) | Bare Procs; `restartPolicy` for run-to-completion tasks |
 | Intermediate | [`03-env-and-workdir.yaml`](03-env-and-workdir.yaml) | `env`, `workingDir`, argv vs shell |
 | Intermediate | [`04-graceful-shutdown.yaml`](04-graceful-shutdown.yaml) | `stopSignal`, grace period, the TERM→wait→KILL sequence |
-| Advanced | [`05-replicas-and-labels.yaml`](05-replicas-and-labels.yaml) | Replicas, labels/annotations, how template changes roll out |
+| Advanced | [`05-replicas-and-labels.yaml`](05-replicas-and-labels.yaml) | Replicas, labels/annotations, Recreate updates, `IMP_REPLICA_INDEX` |
 | Advanced | [`06-full-stack.yaml`](06-full-stack.yaml) | Multi-document files, a multi-service app, every spec field |
+| Advanced | [`07-rolling-update.yaml`](07-rolling-update.yaml) | RollingUpdate: one ordinal at a time, high→low |
 
 Work through one:
 
@@ -77,9 +79,11 @@ them with impctl.
   directly. Wrap in `sh -c` only when you need shell features.
 - Defaults applied server-side: `replicas: 1`, `restartPolicy: Always`,
   `stopSignal: TERM`, `terminationGracePeriodSeconds: 30`,
-  `updateStrategy.type: Recreate`.
+  `updateStrategy.type: Recreate` (or `RollingUpdate` with `partition: 0`).
 - The `impd.sh/` label prefix belongs to the system. On Procs you'll see
   `impd.sh/daemon-name`, `impd.sh/replica-index`, and `impd.sh/template-hash`
   — the hash is how updates work: editing a Daemon's template never mutates
   running Procs; replacement Procs are created from the new template
-  (`Recreate`: stop old, then start new).
+  (`Recreate`: stop all old, then start new; `RollingUpdate`: one ordinal
+  at a time, highest first). execd injects `IMP_REPLICA_INDEX` for
+  per-replica config (ports, etc.); imp does not rewrite args/env for you.

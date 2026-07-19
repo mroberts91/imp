@@ -1,0 +1,30 @@
+# 07 — RollingUpdate: replace one replica at a time.
+#
+# Unlike Recreate (stop everything, then start the new template),
+# RollingUpdate walks ordinals from highest to lowest: delete one stale
+# Proc, wait until its replacement is Ready, then continue. Optional
+# partition holds ordinals below that index on the old hash (canary).
+#
+#   impctl apply -f examples/07-rolling-update.yaml
+#   # edit the echo string below, re-apply, watch:
+#   impctl get procs -w
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: rollme
+spec:
+  replicas: 3
+  updateStrategy:
+    type: RollingUpdate
+    # rollingUpdate:
+    #   partition: 0   # default; set to 1 to leave ordinal 0 on the old hash
+  template:
+    metadata:
+      labels:
+        app: rollme
+    spec:
+      command:
+        - sh
+        - -c
+        - while true; do echo "rollme v1 index=$IMP_REPLICA_INDEX"; sleep 10; done
+      restartPolicy: Always

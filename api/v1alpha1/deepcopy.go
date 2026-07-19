@@ -63,7 +63,22 @@ func (in *DaemonSpec) DeepCopy() *DaemonSpec {
 	if in.Replicas != nil {
 		out.Replicas = new(*in.Replicas)
 	}
+	if in.UpdateStrategy.RollingUpdate != nil {
+		out.UpdateStrategy.RollingUpdate = in.UpdateStrategy.RollingUpdate.DeepCopy()
+	}
 	out.Template = *in.Template.DeepCopy()
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *RollingUpdateDaemonStrategy) DeepCopy() *RollingUpdateDaemonStrategy {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Partition != nil {
+		out.Partition = new(*in.Partition)
+	}
 	return &out
 }
 

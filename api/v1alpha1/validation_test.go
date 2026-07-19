@@ -101,8 +101,32 @@ func TestValidateDaemon(t *testing.T) {
 		},
 		{
 			name:       "unknown update strategy",
-			mutate:     func(d *Daemon) { d.Spec.UpdateStrategy.Type = "RollingUpdate" },
+			mutate:     func(d *Daemon) { d.Spec.UpdateStrategy.Type = "Canary" },
 			wantFields: []string{"spec.updateStrategy.type"},
+		},
+		{
+			name: "rollingUpdate ok",
+			mutate: func(d *Daemon) {
+				d.Spec.UpdateStrategy.Type = UpdateStrategyRollingUpdate
+				d.Spec.UpdateStrategy.RollingUpdate = &RollingUpdateDaemonStrategy{Partition: new(int32(1))}
+			},
+			wantFields: nil,
+		},
+		{
+			name: "rollingUpdate on Recreate",
+			mutate: func(d *Daemon) {
+				d.Spec.UpdateStrategy.Type = UpdateStrategyRecreate
+				d.Spec.UpdateStrategy.RollingUpdate = &RollingUpdateDaemonStrategy{}
+			},
+			wantFields: []string{"spec.updateStrategy.rollingUpdate"},
+		},
+		{
+			name: "negative partition",
+			mutate: func(d *Daemon) {
+				d.Spec.UpdateStrategy.Type = UpdateStrategyRollingUpdate
+				d.Spec.UpdateStrategy.RollingUpdate = &RollingUpdateDaemonStrategy{Partition: new(int32(-1))}
+			},
+			wantFields: []string{"spec.updateStrategy.rollingUpdate.partition"},
 		},
 		{
 			name:       "empty command",

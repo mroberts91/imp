@@ -163,6 +163,13 @@ tasks:
       - bash scripts/m3-acceptance.sh
     platforms: [linux]
 
+  accept:m4:
+    desc: Rootless M4 acceptance (RollingUpdate high→low, D2 IMP_REPLICA_INDEX, SIGTERM)
+    deps: [build]
+    cmds:
+      - bash scripts/m4-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

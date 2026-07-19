@@ -154,3 +154,54 @@ func TestDefaultProbePreservesSetValues(t *testing.T) {
 		t.Errorf("set probe values overwritten: %+v", p)
 	}
 }
+
+func TestDefaultTimer(t *testing.T) {
+	tm := &Timer{
+		Metadata: ObjectMeta{Name: "backup"},
+		Spec: TimerSpec{
+			Schedule: "@hourly",
+			Template: ProcTemplate{Spec: ProcTemplateSpec{Command: []string{"/usr/bin/backup"}}},
+		},
+	}
+	DefaultTimer(tm)
+
+	if tm.Spec.Suspend == nil || *tm.Spec.Suspend {
+		t.Errorf("Suspend = %v, want false", tm.Spec.Suspend)
+	}
+	if tm.Spec.ConcurrencyPolicy != ConcurrencyForbid {
+		t.Errorf("ConcurrencyPolicy = %q, want Forbid", tm.Spec.ConcurrencyPolicy)
+	}
+	if v := tm.Spec.SuccessfulHistoryLimit; v == nil || *v != 3 {
+		t.Errorf("SuccessfulHistoryLimit = %v, want 3", v)
+	}
+	if v := tm.Spec.FailedHistoryLimit; v == nil || *v != 1 {
+		t.Errorf("FailedHistoryLimit = %v, want 1", v)
+	}
+	if tm.Spec.Template.Spec.RestartPolicy != RestartPolicyNever {
+		t.Errorf("RestartPolicy = %q, want Never (not the daemon-shaped Always)", tm.Spec.Template.Spec.RestartPolicy)
+	}
+	if tm.Spec.Template.Spec.StopSignal != DefaultStopSignal {
+		t.Errorf("StopSignal = %q, want %q", tm.Spec.Template.Spec.StopSignal, DefaultStopSignal)
+	}
+}
+
+func TestDefaultTimerPreservesSetValues(t *testing.T) {
+	tm := &Timer{
+		Metadata: ObjectMeta{Name: "backup"},
+		Spec: TimerSpec{
+			Schedule:          "@hourly",
+			ConcurrencyPolicy: ConcurrencyAllow,
+			Template: ProcTemplate{Spec: ProcTemplateSpec{
+				Command:       []string{"/usr/bin/backup"},
+				RestartPolicy: RestartPolicyOnFailure,
+			}},
+		},
+	}
+	DefaultTimer(tm)
+	if tm.Spec.ConcurrencyPolicy != ConcurrencyAllow {
+		t.Errorf("explicit ConcurrencyPolicy overwritten to %q", tm.Spec.ConcurrencyPolicy)
+	}
+	if tm.Spec.Template.Spec.RestartPolicy != RestartPolicyOnFailure {
+		t.Errorf("explicit RestartPolicy overwritten to %q", tm.Spec.Template.Spec.RestartPolicy)
+	}
+}

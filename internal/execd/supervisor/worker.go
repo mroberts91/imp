@@ -244,7 +244,7 @@ func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
 		return fmt.Errorf("cgroup limits: %w", err)
 	}
 
-	stdout, stderr, err := w.logs.Open(p.Metadata.Name)
+	stdout, stderr, err := w.logs.Open(p.Metadata.Name, p.Spec.LogRetention)
 	if err != nil {
 		return err
 	}
@@ -414,13 +414,15 @@ func (w *worker) startProbes(p *v1alpha1.Proc) {
 }
 
 func (w *worker) publishCgroupSnap(p *v1alpha1.Proc) {
-	daemon := ""
+	daemon, timer := "", ""
 	if p != nil {
 		daemon = p.Metadata.Labels[v1alpha1.LabelDaemonName]
+		timer = p.Metadata.Labels[v1alpha1.LabelTimerName]
 	}
 	w.m.setCgroupSnap(w.key, metrics.ProcCgroup{
 		Proc:   w.name,
 		Daemon: daemon,
+		Timer:  timer,
 		Path:   w.rt.CgroupPath,
 	})
 }

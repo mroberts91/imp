@@ -1,0 +1,24 @@
+# 09 — Per-daemon log rotation policy.
+#
+# Each Proc's stdout/stderr is captured to
+#   {data-dir}/logs/{proc}/current.log
+# rotated by size. logRetention tunes that per template (defaults:
+# maxSizeMB 10, maxBackups 3, maxAgeDays 0 = no age pruning).
+#
+# logRetention lives inside the hashed template: editing it rolls the
+# Daemon's Procs like any other spec change.
+#
+#   impctl apply -f examples/09-log-retention.yaml
+#   impctl logs chatty
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: chatty
+spec:
+  template:
+    spec:
+      command: ["sh", "-c", "while true; do date; sleep 1; done"]
+      logRetention:
+        maxSizeMB: 1     # rotate at 1 MiB
+        maxBackups: 2    # keep two rotated files
+        maxAgeDays: 7    # and nothing older than a week

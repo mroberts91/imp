@@ -26,6 +26,7 @@ var pluralByKind = map[string]string{
 	v1alpha1.KindDaemon: "daemons",
 	v1alpha1.KindProc:   "procs",
 	v1alpha1.KindEvent:  "events",
+	v1alpha1.KindTimer:  "timers",
 }
 
 type Client struct {
@@ -202,6 +203,21 @@ func (c *Client) ServerVersion(ctx context.Context) (*v1alpha1.VersionInfo, erro
 		return nil, fmt.Errorf("client: decoding version: %w", err)
 	}
 	return &v, nil
+}
+
+// Stats returns point-in-time resource observations for running Procs
+// (the data behind impctl top). 501 when the serving impd has no stats
+// provider wired.
+func (c *Client) Stats(ctx context.Context) ([]v1alpha1.ProcStat, error) {
+	raw, err := c.doJSON(ctx, http.MethodGet, apiPrefix+"stats", nil)
+	if err != nil {
+		return nil, err
+	}
+	var l v1alpha1.StatsList
+	if err := json.Unmarshal(raw, &l); err != nil {
+		return nil, fmt.Errorf("client: decoding stats: %w", err)
+	}
+	return l.Items, nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, body []byte) (json.RawMessage, error) {

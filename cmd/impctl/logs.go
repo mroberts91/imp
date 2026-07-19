@@ -46,6 +46,14 @@ func newLogsCmd(newClient func() *client.Client) *cobra.Command {
 	cmd.Flags().BoolVarP(&opts.Follow, "follow", "f", false, "stream new lines as they are written")
 	cmd.Flags().IntVar(&opts.TailLines, "tail", 0, "show only the last N lines (0 shows everything)")
 	cmd.Flags().BoolVar(&opts.Timestamps, "timestamps", false, "prefix each line with its capture time")
+	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) > 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		names := completeNames(cmd, newClient, v1alpha1.KindDaemon)
+		names = append(names, completeNames(cmd, newClient, v1alpha1.KindProc)...)
+		return names, cobra.ShellCompDirectiveNoFileComp
+	}
 	return cmd
 }
 

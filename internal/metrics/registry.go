@@ -19,6 +19,7 @@ const (
 
 	ControllerDaemon = "daemon"
 	ControllerGC     = "gc"
+	ControllerTimer  = "timer"
 )
 
 // Registry owns the Prometheus registry and metric vectors.

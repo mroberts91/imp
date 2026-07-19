@@ -26,6 +26,7 @@ const (
 	fileMemoryCurrent  = "memory.current"
 	fileCPUWeight      = "cpu.weight"
 	filePidsMax        = "pids.max"
+	filePidsCurrent    = "pids.current"
 	fileCPUStat        = "cpu.stat"
 )
 
@@ -33,6 +34,8 @@ const (
 type Stats struct {
 	MemoryCurrent uint64
 	CPUUsageUsec  uint64
+	// PidsCurrent is best-effort: 0 when the pids controller is absent.
+	PidsCurrent uint64
 }
 
 // Manager owns a writable cgroup v2 subtree and creates per-Proc children.
@@ -172,6 +175,7 @@ func (m *Manager) Stats(path string) (Stats, error) {
 	if err != nil {
 		return st, err
 	}
+	found := false
 	for line := range strings.SplitSeq(string(cpuStat), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 2 && fields[0] == "usage_usec" {
@@ -179,10 +183,18 @@ func (m *Manager) Stats(path string) (Stats, error) {
 			if err != nil {
 				return st, fmt.Errorf("parse cpu.stat usage_usec: %w", err)
 			}
-			return st, nil
+			found = true
+			break
 		}
 	}
-	return st, fmt.Errorf("cpu.stat: usage_usec not found")
+	if !found {
+		return st, fmt.Errorf("cpu.stat: usage_usec not found")
+	}
+	// pids.current is best-effort: the controller may not be delegated.
+	if pids, err := os.ReadFile(filepath.Join(path, filePidsCurrent)); err == nil {
+		st.PidsCurrent, _ = strconv.ParseUint(strings.TrimSpace(string(pids)), 10, 64)
+	}
+	return st, nil
 }
 
 // Remove deletes the cgroup directory. Missing path is a no-op.
@@ -296,6 +308,7 @@ func synthesizeLeaf(path string) error {
 		fileMemoryCurrent: "0",
 		fileCPUWeight:     "100",
 		filePidsMax:       "max",
+		filePidsCurrent:   "0",
 		fileCPUStat:       "usage_usec 0\nuser_usec 0\nsystem_usec 0\n",
 		fileFreeze:        "0",
 	}

@@ -272,6 +272,28 @@ func (s *Server) prepare(kind, urlName string, data []byte, forStatus bool) ([]b
 		body, err := json.Marshal(&obj)
 		return body, rv, err
 
+	case v1alpha1.KindTimer:
+		var obj v1alpha1.Timer
+		if err := strictUnmarshal(data, &obj); err != nil {
+			return nil, 0, invalidBody(err)
+		}
+		if err := checkIdentity(&obj.TypeMeta, &obj.Metadata, kind, urlName); err != nil {
+			return nil, 0, err
+		}
+		rv, err := parseRV(obj.Metadata.ResourceVersion)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !forStatus {
+			obj.Status = v1alpha1.TimerStatus{}
+			v1alpha1.DefaultTimer(&obj)
+			if errs := v1alpha1.ValidateTimer(&obj); len(errs) > 0 {
+				return nil, 0, &v1alpha1.InvalidError{Errs: errs}
+			}
+		}
+		body, err := json.Marshal(&obj)
+		return body, rv, err
+
 	case v1alpha1.KindEvent:
 		var obj v1alpha1.Event
 		if err := strictUnmarshal(data, &obj); err != nil {

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -43,6 +44,7 @@ the access model.`,
 		newDescribeCmd(newClient),
 		newEventsCmd(newClient),
 		newLogsCmd(newClient),
+		newTopCmd(newClient),
 		newVersionCmd(newClient),
 	)
 	return root
@@ -56,7 +58,48 @@ func resolveKindArg(arg string) (string, error) {
 		return v1alpha1.KindProc, nil
 	case "event", "events":
 		return v1alpha1.KindEvent, nil
+	case "timer", "timers":
+		return v1alpha1.KindTimer, nil
 	default:
-		return "", fmt.Errorf("unknown resource type %q (use daemon, proc, or event)", arg)
+		return "", fmt.Errorf("unknown resource type %q (use daemon, proc, event, or timer)", arg)
 	}
+}
+
+// completeKindThenName completes position 0 from kinds and position 1 with
+// live object names of that kind. Fails soft (no completions) when impd is
+// unreachable — completion must never error at the shell.
+func completeKindThenName(newClient func() *client.Client, kinds ...string) cobra.CompletionFunc {
+	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) == 0 {
+			return kinds, cobra.ShellCompDirectiveNoFileComp
+		}
+		if len(args) > 1 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		kind, err := resolveKindArg(args[0])
+		if err != nil {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return completeNames(cmd, newClient, kind), cobra.ShellCompDirectiveNoFileComp
+	}
+}
+
+// completeNames lists live object names of kind, soft-failing to nothing.
+func completeNames(cmd *cobra.Command, newClient func() *client.Client, kind string) []string {
+	list, err := newClient().ListRaw(cmd.Context(), kind)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, raw := range list.Items {
+		var envelope struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		}
+		if json.Unmarshal(raw, &envelope) == nil && envelope.Metadata.Name != "" {
+			names = append(names, envelope.Metadata.Name)
+		}
+	}
+	return names
 }

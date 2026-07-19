@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/apiserver"
 	"github.com/mroberts91/imp/internal/etcl"
@@ -32,6 +34,11 @@ type fixture struct {
 
 func start(t *testing.T, storeOpts *etcl.Options, logs apiserver.LogStreamer) *fixture {
 	t.Helper()
+	return startWith(t, storeOpts, func(cfg *apiserver.Config) { cfg.Logs = logs })
+}
+
+func startWith(t *testing.T, storeOpts *etcl.Options, mutate func(*apiserver.Config)) *fixture {
+	t.Helper()
 	dir, err := os.MkdirTemp("", "imp")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
@@ -44,11 +51,14 @@ func start(t *testing.T, storeOpts *etcl.Options, logs apiserver.LogStreamer) *f
 	}
 	t.Cleanup(func() { store.Close() })
 
-	srv := apiserver.New(apiserver.Config{
+	cfg := apiserver.Config{
 		Store:   store,
-		Logs:    logs,
 		Version: v1alpha1.VersionInfo{Version: "test", Commit: "abc123"},
-	})
+	}
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	srv := apiserver.New(cfg)
 	socket := filepath.Join(dir, "impd.sock")
 	l, err := apiserver.Listen(socket)
 	if err != nil {
@@ -584,5 +594,101 @@ func unixTransport(socket string) *http.Transport {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
 		},
+	}
+}
+
+func testTimer(name string) *v1alpha1.Timer {
+	return &v1alpha1.Timer{
+		Metadata: v1alpha1.ObjectMeta{Name: name},
+		Spec: v1alpha1.TimerSpec{
+			Schedule: "@every 1m",
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/true"}},
+			},
+		},
+	}
+}
+
+func TestTimerLifecycle(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	applied, err := f.client.ApplyTimer(ctx, testTimer("backup"))
+	if err != nil {
+		t.Fatalf("ApplyTimer: %v", err)
+	}
+	// Server-side defaulting ran.
+	if applied.Spec.ConcurrencyPolicy != v1alpha1.ConcurrencyForbid {
+		t.Errorf("ConcurrencyPolicy = %q, want Forbid", applied.Spec.ConcurrencyPolicy)
+	}
+	if applied.Spec.Template.Spec.RestartPolicy != v1alpha1.RestartPolicyNever {
+		t.Errorf("RestartPolicy = %q, want Never", applied.Spec.Template.Spec.RestartPolicy)
+	}
+
+	// Invalid schedule is a 422 naming the field.
+	bad := testTimer("bad")
+	bad.Spec.Schedule = "whenever"
+	if _, err := f.client.ApplyTimer(ctx, bad); !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Errorf("bad schedule apply error = %v, want ErrInvalid", err)
+	}
+
+	// Status subresource is CAS and does not bump generation.
+	applied.Status.LastScheduleTime = v1alpha1.NewTime(time.Now())
+	updated, err := f.client.UpdateTimerStatus(ctx, applied)
+	if err != nil {
+		t.Fatalf("UpdateTimerStatus: %v", err)
+	}
+	if updated.Metadata.Generation != applied.Metadata.Generation {
+		t.Errorf("status write bumped generation %d -> %d", applied.Metadata.Generation, updated.Metadata.Generation)
+	}
+	if updated.Status.LastScheduleTime.IsZero() {
+		t.Error("status write dropped lastScheduleTime")
+	}
+
+	// Only "backup" persisted: the invalid apply above must not have.
+	timers, _, err := f.client.ListTimers(ctx)
+	if err != nil || len(timers) != 1 {
+		t.Fatalf("ListTimers = %d timers, err %v; want 1", len(timers), err)
+	}
+	if err := f.client.DeleteTimer(ctx, "backup"); err != nil {
+		t.Fatalf("DeleteTimer: %v", err)
+	}
+}
+
+type fakeStats struct{ items []v1alpha1.ProcStat }
+
+func (f fakeStats) ProcStats() []v1alpha1.ProcStat { return f.items }
+
+func TestStatsRoute(t *testing.T) {
+	ctx := t.Context()
+
+	// No provider wired: an error, not an empty success.
+	f := start(t, nil, nil)
+	if _, err := f.client.Stats(ctx); err == nil {
+		t.Error("Stats with no provider returned nil error, want 501-shaped failure")
+	}
+
+	want := []v1alpha1.ProcStat{{
+		Proc:               "web-0-abc",
+		Owner:              v1alpha1.ObjectRef{Kind: v1alpha1.KindDaemon, Name: "web"},
+		CPUUsageUsec:       123456,
+		MemoryCurrentBytes: 7 * 1024 * 1024,
+		PidsCurrent:        3,
+		SampledAt:          v1alpha1.NewTime(time.Now()),
+	}}
+	f = startWith(t, nil, func(cfg *apiserver.Config) { cfg.Stats = fakeStats{items: want} })
+	got, err := f.client.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("stats round-trip mismatch (-want +got):\n%s", diff)
+	}
+
+	// Empty provider result serves an empty list, not null.
+	f = startWith(t, nil, func(cfg *apiserver.Config) { cfg.Stats = fakeStats{} })
+	got, err = f.client.Stats(ctx)
+	if err != nil || got == nil || len(got) != 0 {
+		t.Errorf("empty stats = %v (err %v), want empty non-nil slice", got, err)
 	}
 }

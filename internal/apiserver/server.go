@@ -29,23 +29,26 @@ var kindByPlural = map[string]string{
 	"daemons": v1alpha1.KindDaemon,
 	"procs":   v1alpha1.KindProc,
 	"events":  v1alpha1.KindEvent,
+	"timers":  v1alpha1.KindTimer,
 }
 
 type Config struct {
 	Store   *etcl.Store
 	Logs    LogStreamer
+	Stats   StatsProvider
 	Version v1alpha1.VersionInfo
 }
 
 type Server struct {
 	store   *etcl.Store
 	logs    LogStreamer
+	stats   StatsProvider
 	version v1alpha1.VersionInfo
 	mux     *http.ServeMux
 }
 
 func New(cfg Config) *Server {
-	s := &Server{store: cfg.Store, logs: cfg.Logs, version: cfg.Version}
+	s := &Server{store: cfg.Store, logs: cfg.Logs, stats: cfg.Stats, version: cfg.Version}
 	if s.version.GoVersion == "" {
 		s.version.GoVersion = runtime.Version()
 	}
@@ -57,6 +60,8 @@ func New(cfg Config) *Server {
 	mux.HandleFunc("DELETE /apis/impd.sh/v1alpha1/{kinds}/{name}", s.handleDelete)
 	mux.HandleFunc("PUT /apis/impd.sh/v1alpha1/{kinds}/{name}/status", s.handleStatus)
 	mux.HandleFunc("GET /apis/impd.sh/v1alpha1/procs/{name}/log", s.handleLogs)
+	// "stats" is a literal segment, so it wins over the {kinds} pattern.
+	mux.HandleFunc("GET /apis/impd.sh/v1alpha1/stats", s.handleStats)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")

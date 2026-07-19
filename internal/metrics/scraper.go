@@ -15,6 +15,9 @@ import (
 // ProcCgroup is one running Proc's cgroup path for resource scrapes.
 type ProcCgroup struct {
 	Proc, Daemon, Path string
+	// Timer is set instead of Daemon for Timer-owned Procs. The scraper
+	// itself only labels by daemon; top uses whichever owner is present.
+	Timer string
 }
 
 // ProcLister returns current Proc cgroup membership for the scraper.

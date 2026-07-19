@@ -26,6 +26,7 @@ import (
 	"github.com/mroberts91/imp/internal/controllers/daemon"
 	"github.com/mroberts91/imp/internal/controllers/eventttl"
 	"github.com/mroberts91/imp/internal/controllers/gc"
+	"github.com/mroberts91/imp/internal/controllers/timer"
 	"github.com/mroberts91/imp/internal/etcl"
 	"github.com/mroberts91/imp/internal/execd/cgroups"
 	"github.com/mroberts91/imp/internal/execd/logs"
@@ -87,9 +88,31 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	}
 
 	logStore := logs.New(filepath.Join(dataDir, "logs"), clock.Real{})
+
+	// Everything below is inert construction — nothing dials or runs until
+	// Serve / Run. The supervisor is built before the api-server so it can
+	// be wired in as the StatsProvider behind /stats (impctl top).
+	ctlClient := client.New(socketPath)
+	clk := clock.Real{}
+	met := metrics.New()
+	manifestRec := recorder.New(ctlClient, "manifest", clk)
+	daemonRec := recorder.New(ctlClient, daemon.ReportingComponent, clk)
+	timerRec := recorder.New(ctlClient, timer.ReportingComponent, clk)
+	execRec := recorder.New(ctlClient, "execd", clk)
+
+	// execd supervisor: handlers never fire before Run, so assigning the
+	// manager after NewInformer (same pattern as dcEnqueueOwner) is safe.
+	var execMgr *supervisor.Manager
+	execInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) {
+		execMgr.Handle(key)
+	}, nil)
+	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, cgMgr, clk, execRec, killProcsOnShutdown)
+	execMgr.SetMetrics(met)
+
 	server := apiserver.New(apiserver.Config{
 		Store: store,
 		Logs:  logStore,
+		Stats: execMgr,
 		Version: v1alpha1.VersionInfo{
 			Version: version, Commit: commit, Branch: branch, BuildTime: buildTime,
 		},
@@ -111,13 +134,6 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		}
 	}()
 
-	ctlClient := client.New(socketPath)
-	clk := clock.Real{}
-	met := metrics.New()
-	manifestRec := recorder.New(ctlClient, "manifest", clk)
-	daemonRec := recorder.New(ctlClient, daemon.ReportingComponent, clk)
-	execRec := recorder.New(ctlClient, "execd", clk)
-
 	watcherDone := make(chan struct{})
 	go func() {
 		defer close(watcherDone)
@@ -136,23 +152,26 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		daemon.New(ctlClient, dcDaemonInf.Store(), dcProcInf.Store(), clk, daemonRec), 1, dcDaemonInf, dcProcInf)
 	dcRunner.SetMetrics(met, metrics.ControllerDaemon)
 
+	// Timer controller: a Timer change enqueues its own key; a Proc change
+	// enqueues the owning Timer.
+	tcQueue := queue.NewRateLimiting(queue.DefaultRateLimiter())
+	tcTimerInf := cache.NewInformer(ctlClient, v1alpha1.KindTimer, func(key string) { tcQueue.Add(key) }, nil)
+	var tcEnqueueOwner func(key string)
+	tcProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) { tcEnqueueOwner(key) }, nil)
+	tcEnqueueOwner = controllers.EnqueueOwner(tcProcInf.Store(), v1alpha1.KindTimer, tcQueue)
+	tcRunner := controllers.NewRunner("timer-controller", tcQueue,
+		timer.New(ctlClient, tcTimerInf.Store(), tcProcInf.Store(), clk, timerRec), 1, tcTimerInf, tcProcInf)
+	tcRunner.SetMetrics(met, metrics.ControllerTimer)
+
 	gcQueue := queue.NewRateLimiting(queue.DefaultRateLimiter())
 	gcProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) { gcQueue.Add(key) }, nil)
 	gcDaemonInf := cache.NewInformer(ctlClient, v1alpha1.KindDaemon, gc.EnqueueOwnedProcs(gcProcInf.Store(), gcQueue), nil)
+	gcTimerInf := cache.NewInformer(ctlClient, v1alpha1.KindTimer, gc.EnqueueOwnedProcs(gcProcInf.Store(), gcQueue), nil)
 	gcRunner := controllers.NewRunner("gc", gcQueue,
-		gc.New(ctlClient, gcDaemonInf.Store(), gcProcInf.Store()), 1, gcDaemonInf, gcProcInf)
+		gc.New(ctlClient, gcDaemonInf.Store(), gcTimerInf.Store(), gcProcInf.Store()), 1, gcDaemonInf, gcTimerInf, gcProcInf)
 	gcRunner.SetMetrics(met, metrics.ControllerGC)
 
 	ttlCtl := eventttl.New(ctlClient, eventTTL, clk)
-
-	// execd supervisor: handlers never fire before Run, so assigning the
-	// manager after NewInformer (same pattern as dcEnqueueOwner) is safe.
-	var execMgr *supervisor.Manager
-	execInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) {
-		execMgr.Handle(key)
-	}, nil)
-	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, cgMgr, clk, execRec, killProcsOnShutdown)
-	execMgr.SetMetrics(met)
 
 	metricsBound, metricsShutdown, err := metrics.ListenAndServe(metricsAddr, met)
 	if err != nil {
@@ -168,7 +187,10 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 
 	go dcDaemonInf.Run(ctx)
 	go dcProcInf.Run(ctx)
+	go tcTimerInf.Run(ctx)
+	go tcProcInf.Run(ctx)
 	go gcDaemonInf.Run(ctx)
+	go gcTimerInf.Run(ctx)
 	go gcProcInf.Run(ctx)
 	go execInf.Run(ctx)
 
@@ -183,6 +205,13 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		defer close(daemonDone)
 		if err := dcRunner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("daemon controller failed", "component", "daemon-controller", "error", err)
+		}
+	}()
+	timerDone := make(chan struct{})
+	go func() {
+		defer close(timerDone)
+		if err := tcRunner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("timer controller failed", "component", "timer-controller", "error", err)
 		}
 	}()
 	gcDone := make(chan struct{})
@@ -216,7 +245,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		return fmt.Errorf("api-server: %w", err)
 	}
 
-	// Ordered shutdown: manifest → controllers (daemon, gc, eventttl) → execd → metrics → store → HTTP.
+	// Ordered shutdown: manifest → controllers (daemon, timer, gc, eventttl) → execd → metrics → store → HTTP.
 	select {
 	case <-watcherDone:
 	case <-time.After(5 * time.Second):
@@ -226,6 +255,11 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	case <-daemonDone:
 	case <-time.After(5 * time.Second):
 		slog.Warn("daemon controller did not stop in time")
+	}
+	select {
+	case <-timerDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("timer controller did not stop in time")
 	}
 	select {
 	case <-gcDone:

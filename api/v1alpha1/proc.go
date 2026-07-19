@@ -46,6 +46,26 @@ type ProcTemplateSpec struct {
 	Resources                     ResourceRequirements `json:"resources,omitzero"`
 	LivenessProbe                 *Probe               `json:"livenessProbe,omitempty"`
 	ReadinessProbe                *Probe               `json:"readinessProbe,omitempty"`
+	// LogRetention tunes per-proc log rotation. Nil means the built-in
+	// defaults (10 MiB, 3 backups, no age pruning), resolved by execd at
+	// consumption time — never defaulted here, so pre-M5 template hashes
+	// stay stable and existing Daemons do not roll on upgrade.
+	LogRetention *LogRetention `json:"logRetention,omitempty"`
+}
+
+// LogRetention is the per-proc log rotation policy (doc 08 M5-d). It lives
+// inside the hashed template: changing it rolls the Daemon, like any other
+// spec change. Nil inner fields mean the built-in default for that field.
+type LogRetention struct {
+	// MaxSizeMB is the size a log file may reach before rotation.
+	MaxSizeMB *int32 `json:"maxSizeMB,omitempty"`
+	// MaxBackups is how many rotated files are kept. 0 keeps them all
+	// (bounded only by MaxAgeDays) — 0 consistently means "no limit on
+	// this axis".
+	MaxBackups *int32 `json:"maxBackups,omitempty"`
+	// MaxAgeDays prunes rotated files older than this. 0 keeps them until
+	// MaxBackups retires them.
+	MaxAgeDays *int32 `json:"maxAgeDays,omitempty"`
 }
 
 type ProcPhase string

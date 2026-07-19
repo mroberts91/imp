@@ -113,6 +113,71 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 	if in.ReadinessProbe != nil {
 		out.ReadinessProbe = in.ReadinessProbe.DeepCopy()
 	}
+	if in.LogRetention != nil {
+		out.LogRetention = in.LogRetention.DeepCopy()
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *LogRetention) DeepCopy() *LogRetention {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.MaxSizeMB != nil {
+		out.MaxSizeMB = new(*in.MaxSizeMB)
+	}
+	if in.MaxBackups != nil {
+		out.MaxBackups = new(*in.MaxBackups)
+	}
+	if in.MaxAgeDays != nil {
+		out.MaxAgeDays = new(*in.MaxAgeDays)
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *Timer) DeepCopy() *Timer {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Metadata = *in.Metadata.DeepCopy()
+	out.Spec = *in.Spec.DeepCopy()
+	out.Status = *in.Status.DeepCopy()
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *TimerSpec) DeepCopy() *TimerSpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Suspend != nil {
+		out.Suspend = new(*in.Suspend)
+	}
+	if in.StartingDeadlineSeconds != nil {
+		out.StartingDeadlineSeconds = new(*in.StartingDeadlineSeconds)
+	}
+	if in.SuccessfulHistoryLimit != nil {
+		out.SuccessfulHistoryLimit = new(*in.SuccessfulHistoryLimit)
+	}
+	if in.FailedHistoryLimit != nil {
+		out.FailedHistoryLimit = new(*in.FailedHistoryLimit)
+	}
+	out.Template = *in.Template.DeepCopy()
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *TimerStatus) DeepCopy() *TimerStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Conditions = slices.Clone(in.Conditions)
 	return &out
 }
 

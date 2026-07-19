@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/robfig/cron/v3"
 )
 
 const (
@@ -101,6 +103,51 @@ func ValidateProc(p *Proc) ErrorList {
 	return errs
 }
 
+func ValidateTimer(t *Timer) ErrorList {
+	var errs ErrorList
+	errs = append(errs, validateObjectMeta(&t.Metadata, NewPath("metadata"))...)
+
+	specPath := NewPath("spec")
+	if t.Spec.Schedule == "" {
+		errs = append(errs, requiredErr(specPath.Child("schedule"), ""))
+	} else if _, err := cron.ParseStandard(t.Spec.Schedule); err != nil {
+		errs = append(errs, invalidErr(specPath.Child("schedule"), t.Spec.Schedule, err.Error()))
+	}
+
+	switch t.Spec.ConcurrencyPolicy {
+	case ConcurrencyForbid, ConcurrencyAllow, ConcurrencyReplace:
+	default:
+		errs = append(errs, notSupportedErr(specPath.Child("concurrencyPolicy"), t.Spec.ConcurrencyPolicy,
+			[]string{string(ConcurrencyForbid), string(ConcurrencyAllow), string(ConcurrencyReplace)}))
+	}
+
+	if v := t.Spec.StartingDeadlineSeconds; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(specPath.Child("startingDeadlineSeconds"), *v, "must be greater than or equal to 0"))
+	}
+	if v := t.Spec.SuccessfulHistoryLimit; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(specPath.Child("successfulHistoryLimit"), *v, "must be greater than or equal to 0"))
+	}
+	if v := t.Spec.FailedHistoryLimit; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(specPath.Child("failedHistoryLimit"), *v, "must be greater than or equal to 0"))
+	}
+
+	tplMetaPath := specPath.Child("template").Child("metadata")
+	errs = append(errs, validateLabels(t.Spec.Template.Metadata.Labels, tplMetaPath.Child("labels"))...)
+	errs = append(errs, validateAnnotations(t.Spec.Template.Metadata.Annotations, tplMetaPath.Child("annotations"))...)
+	tplSpecPath := specPath.Child("template").Child("spec")
+	errs = append(errs, validateProcTemplateSpec(&t.Spec.Template.Spec, tplSpecPath)...)
+
+	// A Timer run must terminate: Always is the daemon posture and would
+	// respawn the process forever.
+	switch t.Spec.Template.Spec.RestartPolicy {
+	case RestartPolicyNever, RestartPolicyOnFailure:
+	default:
+		errs = append(errs, notSupportedErr(tplSpecPath.Child("restartPolicy"), t.Spec.Template.Spec.RestartPolicy,
+			[]string{string(RestartPolicyNever), string(RestartPolicyOnFailure)}))
+	}
+	return errs
+}
+
 func ValidateEvent(e *Event) ErrorList {
 	var errs ErrorList
 	errs = append(errs, validateObjectMeta(&e.Metadata, NewPath("metadata"))...)
@@ -171,6 +218,23 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 	}
 	if s.ReadinessProbe != nil {
 		errs = append(errs, validateProbe(s.ReadinessProbe, p.Child("readinessProbe"), false)...)
+	}
+	if s.LogRetention != nil {
+		errs = append(errs, validateLogRetention(s.LogRetention, p.Child("logRetention"))...)
+	}
+	return errs
+}
+
+func validateLogRetention(lr *LogRetention, p *Path) ErrorList {
+	var errs ErrorList
+	if v := lr.MaxSizeMB; v != nil && *v < 1 {
+		errs = append(errs, invalidErr(p.Child("maxSizeMB"), *v, "must be greater than or equal to 1"))
+	}
+	if v := lr.MaxBackups; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(p.Child("maxBackups"), *v, "must be greater than or equal to 0"))
+	}
+	if v := lr.MaxAgeDays; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(p.Child("maxAgeDays"), *v, "must be greater than or equal to 0"))
 	}
 	return errs
 }

@@ -22,6 +22,16 @@ const (
 
 	DefaultHTTPGetHost   = "127.0.0.1"
 	DefaultTCPSocketHost = "127.0.0.1"
+
+	// Log retention built-ins (doc 08 M5-d). Resolved by execd when a
+	// Proc's logRetention (or one of its fields) is nil — deliberately NOT
+	// materialized by defaulting, so pre-M5 template hashes stay stable.
+	DefaultLogMaxSizeMB  = int32(10)
+	DefaultLogMaxBackups = int32(3)
+	DefaultLogMaxAgeDays = int32(0)
+
+	defaultSuccessfulHistoryLimit = int32(3)
+	defaultFailedHistoryLimit     = int32(1)
 )
 
 func DefaultDaemon(d *Daemon) {
@@ -44,6 +54,27 @@ func DefaultDaemon(d *Daemon) {
 
 func DefaultProc(p *Proc) {
 	defaultProcTemplateSpec(&p.Spec)
+}
+
+func DefaultTimer(t *Timer) {
+	if t.Spec.Suspend == nil {
+		t.Spec.Suspend = new(false)
+	}
+	if t.Spec.ConcurrencyPolicy == "" {
+		t.Spec.ConcurrencyPolicy = ConcurrencyForbid
+	}
+	if t.Spec.SuccessfulHistoryLimit == nil {
+		t.Spec.SuccessfulHistoryLimit = new(defaultSuccessfulHistoryLimit)
+	}
+	if t.Spec.FailedHistoryLimit == nil {
+		t.Spec.FailedHistoryLimit = new(defaultFailedHistoryLimit)
+	}
+	// Timer runs are run-to-completion: the daemon-shaped Always default
+	// is wrong here, so pick Never before the shared defaulting runs.
+	if t.Spec.Template.Spec.RestartPolicy == "" {
+		t.Spec.Template.Spec.RestartPolicy = RestartPolicyNever
+	}
+	defaultProcTemplateSpec(&t.Spec.Template.Spec)
 }
 
 func defaultProcTemplateSpec(s *ProcTemplateSpec) {

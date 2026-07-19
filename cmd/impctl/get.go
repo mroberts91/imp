@@ -21,7 +21,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	var output string
 	var watch bool
 	cmd := &cobra.Command{
-		Use:   "get (daemons|procs|events) [NAME]",
+		Use:   "get (daemons|procs|events|timers) [NAME]",
 		Short: "Display one or many objects",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -70,6 +70,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: json or yaml (default is a table)")
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "watch for changes after listing")
+	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemons", "procs", "events", "timers")
 	return cmd
 }
 
@@ -148,6 +149,15 @@ func printWatchRow(w io.Writer, kind, eventType string, raw json.RawMessage) err
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s/%s\t%s\n",
 			eventType, age(e.LastTimestamp), e.Type, e.Reason,
 			strings.ToLower(e.Regarding.Kind), e.Regarding.Name, e.Message)
+	case v1alpha1.KindTimer:
+		var tm v1alpha1.Timer
+		if err := json.Unmarshal(raw, &tm); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			eventType, tm.Metadata.Name, tm.Spec.Schedule,
+			timerActive(&tm), lastRun(&tm),
+			age(tm.Metadata.CreationTimestamp))
 	}
 	return nil
 }
@@ -203,6 +213,12 @@ func printTable(w io.Writer, kind string, items []json.RawMessage) error {
 			return err
 		}
 		printEventTable(w, events)
+	case v1alpha1.KindTimer:
+		timers, err := decodeItems[v1alpha1.Timer](items)
+		if err != nil {
+			return err
+		}
+		printTimerTable(w, timers)
 	}
 	return nil
 }

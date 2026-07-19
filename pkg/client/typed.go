@@ -68,7 +68,7 @@ func (c *Client) DeleteEvent(ctx context.Context, name string) error {
 }
 
 type object interface {
-	v1alpha1.Daemon | v1alpha1.Proc | v1alpha1.Event
+	v1alpha1.Daemon | v1alpha1.Proc | v1alpha1.Event | v1alpha1.Timer
 }
 
 func get[T object](ctx context.Context, c *Client, kind, name string) (*T, error) {
@@ -136,6 +136,9 @@ func stampTypeMeta[T object](obj *T, kind string) string {
 	case *v1alpha1.Event:
 		o.APIVersion, o.Kind = v1alpha1.APIVersion, kind
 		return o.Metadata.Name
+	case *v1alpha1.Timer:
+		o.APIVersion, o.Kind = v1alpha1.APIVersion, kind
+		return o.Metadata.Name
 	default:
 		panic("unreachable: object constraint covers all kinds")
 	}
@@ -147,4 +150,24 @@ func decodeInto[T object](raw json.RawMessage) (*T, error) {
 		return nil, fmt.Errorf("client: decoding object: %w", err)
 	}
 	return obj, nil
+}
+
+func (c *Client) GetTimer(ctx context.Context, name string) (*v1alpha1.Timer, error) {
+	return get[v1alpha1.Timer](ctx, c, v1alpha1.KindTimer, name)
+}
+
+func (c *Client) ListTimers(ctx context.Context) ([]v1alpha1.Timer, string, error) {
+	return list[v1alpha1.Timer](ctx, c, v1alpha1.KindTimer)
+}
+
+func (c *Client) ApplyTimer(ctx context.Context, t *v1alpha1.Timer) (*v1alpha1.Timer, error) {
+	return apply(ctx, c, v1alpha1.KindTimer, t)
+}
+
+func (c *Client) UpdateTimerStatus(ctx context.Context, t *v1alpha1.Timer) (*v1alpha1.Timer, error) {
+	return updateStatus(ctx, c, v1alpha1.KindTimer, t)
+}
+
+func (c *Client) DeleteTimer(ctx context.Context, name string) error {
+	return c.Delete(ctx, v1alpha1.KindTimer, name)
 }

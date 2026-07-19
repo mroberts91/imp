@@ -32,6 +32,9 @@ const (
 	ReasonUnhealthy        = "Unhealthy"
 	ReasonAdopted          = "Adopted"
 	ReasonOrphanKilled     = "OrphanKilled"
+	ReasonScheduledRun     = "ScheduledRun"
+	ReasonSkippedRun       = "SkippedRun"
+	ReasonMissedRun        = "MissedRun"
 )
 
 // Event is an append-only, TTL-bounded record of something notable happening

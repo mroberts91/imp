@@ -20,13 +20,12 @@ import (
 
 	"gopkg.in/natefinch/lumberjack.v2"
 
+	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/apiserver"
 	"github.com/mroberts91/imp/internal/clock"
 )
 
 const (
-	maxLogBytes     = 10 * 1024 * 1024 // 10 MiB
-	maxLogBackups   = 3
 	scannerMaxToken = 16 * 1024
 )
 
@@ -63,8 +62,10 @@ func (s *Store) currentPath(name string) string {
 
 // Open prepares rotated capture for procName and returns stdout/stderr
 // writers that prefix CRI lines into the shared file. Call CloseCapture
-// when the process is reaped.
-func (s *Store) Open(procName string) (stdout, stderr io.WriteCloser, err error) {
+// when the process is reaped. A nil retention (or nil fields) means the
+// built-in defaults — resolution happens here, never in the API (doc 08
+// M5-d keeps pre-M5 template hashes stable).
+func (s *Store) Open(procName string, retention *v1alpha1.LogRetention) (stdout, stderr io.WriteCloser, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.writers[procName]; ok {
@@ -73,10 +74,12 @@ func (s *Store) Open(procName string) (stdout, stderr io.WriteCloser, err error)
 	if err := os.MkdirAll(s.procDir(procName), 0o750); err != nil {
 		return nil, nil, err
 	}
+	size, backups, age := resolveRetention(retention)
 	lj := &lumberjack.Logger{
 		Filename:   s.currentPath(procName),
-		MaxSize:    maxLogBytes / (1024 * 1024),
-		MaxBackups: maxLogBackups,
+		MaxSize:    size,
+		MaxBackups: backups,
+		MaxAge:     age,
 		LocalTime:  true,
 	}
 	pw := &procWriter{lj: lj, clock: s.clock}
@@ -88,6 +91,27 @@ func (s *Store) Open(procName string) (stdout, stderr io.WriteCloser, err error)
 	pw.wg.Go(func() { pw.pump(stderrR, "stderr") })
 	s.writers[procName] = pw
 	return stdoutW, stderrW, nil
+}
+
+// resolveRetention maps a Proc's logRetention (possibly nil, possibly with
+// nil fields) onto concrete lumberjack values.
+func resolveRetention(r *v1alpha1.LogRetention) (sizeMB, backups, ageDays int) {
+	sizeMB = int(v1alpha1.DefaultLogMaxSizeMB)
+	backups = int(v1alpha1.DefaultLogMaxBackups)
+	ageDays = int(v1alpha1.DefaultLogMaxAgeDays)
+	if r == nil {
+		return sizeMB, backups, ageDays
+	}
+	if r.MaxSizeMB != nil {
+		sizeMB = int(*r.MaxSizeMB)
+	}
+	if r.MaxBackups != nil {
+		backups = int(*r.MaxBackups)
+	}
+	if r.MaxAgeDays != nil {
+		ageDays = int(*r.MaxAgeDays)
+	}
+	return sizeMB, backups, ageDays
 }
 
 // CloseCapture finishes capture for procName.

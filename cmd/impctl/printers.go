@@ -136,3 +136,50 @@ func humanDuration(d time.Duration) string {
 		return fmt.Sprintf("%dy", hours/24/365)
 	}
 }
+
+func printTimerTable(w io.Writer, timers []v1alpha1.Timer) {
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "NAME\tSCHEDULE\tSUSPEND\tACTIVE\tLAST RUN\tAGE")
+	for i := range timers {
+		tm := &timers[i]
+		suspend := "false"
+		if tm.Spec.Suspend != nil && *tm.Spec.Suspend {
+			suspend = "true"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			tm.Metadata.Name, tm.Spec.Schedule, suspend,
+			timerActive(tm), lastRun(tm),
+			age(tm.Metadata.CreationTimestamp))
+	}
+	tw.Flush()
+}
+
+// timerActive is the ACTIVE column: the running Proc's name, or "-".
+func timerActive(tm *v1alpha1.Timer) string {
+	if tm.Status.ActiveProc == "" {
+		return "-"
+	}
+	return tm.Status.ActiveProc
+}
+
+// lastRun is the LAST RUN column: how long ago the last tick fired.
+func lastRun(tm *v1alpha1.Timer) string {
+	if tm.Status.LastScheduleTime.IsZero() {
+		return "<never>"
+	}
+	return age(tm.Status.LastScheduleTime)
+}
+
+// formatBytes renders a byte count in binary units, one decimal.
+func formatBytes(b uint64) string {
+	switch {
+	case b >= 1<<30:
+		return fmt.Sprintf("%.1fGi", float64(b)/(1<<30))
+	case b >= 1<<20:
+		return fmt.Sprintf("%.1fMi", float64(b)/(1<<20))
+	case b >= 1<<10:
+		return fmt.Sprintf("%.1fKi", float64(b)/(1<<10))
+	default:
+		return fmt.Sprintf("%d", b)
+	}
+}

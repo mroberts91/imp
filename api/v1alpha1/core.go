@@ -15,27 +15,32 @@ const (
 	KindDaemon = "Daemon"
 	KindProc   = "Proc"
 	KindEvent  = "Event"
+	KindTimer  = "Timer"
 )
 
 var allowedKids = map[string]struct{}{
 	KindDaemon: {},
 	KindProc:   {},
 	KindEvent:  {},
+	KindTimer:  {},
 }
 
 const (
-	LabelDaemonName      = "impd.sh/daemon-name"
-	LabelTemplateHash    = "impd.sh/template-hash"
-	LabelReplicaIndex    = "impd.sh/replica-index"
-	AnnotationManagedBy  = "impd.sh/managed-by"
-	AnnotationSourcePath = "impd.sh/source-path"
-	ManagedByManifest    = "manifest"
+	LabelDaemonName       = "impd.sh/daemon-name"
+	LabelTemplateHash     = "impd.sh/template-hash"
+	LabelReplicaIndex     = "impd.sh/replica-index"
+	LabelTimerName        = "impd.sh/timer-name"
+	AnnotationManagedBy   = "impd.sh/managed-by"
+	AnnotationSourcePath  = "impd.sh/source-path"
+	AnnotationScheduledAt = "impd.sh/scheduled-at"
+	ManagedByManifest     = "manifest"
 )
 
 const (
 	ConditionTypeReady       = "Ready"
 	ConditionTypeAvailable   = "Available"
 	ConditionTypeProgressing = "Progressing"
+	ConditionTypeActive      = "Active"
 )
 
 // ConditionStatus is the status of a condition: True, False, or Unknown.

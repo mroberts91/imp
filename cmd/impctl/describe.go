@@ -9,7 +9,9 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
@@ -23,9 +25,10 @@ import (
 
 func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 	return &cobra.Command{
-		Use:   "describe (daemon|proc) NAME",
-		Short: "Show details of a specific resource, including events",
-		Args:  cobra.ExactArgs(2),
+		Use:               "describe (daemon|proc|timer) NAME",
+		Short:             "Show details of a specific resource, including events",
+		Args:              cobra.ExactArgs(2),
+		ValidArgsFunction: completeKindThenName(newClient, "daemon", "proc", "timer"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, err := resolveKindArg(args[0])
 			if err != nil {
@@ -59,6 +62,16 @@ func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 					return err
 				}
 				describeProc(out, p, events)
+			case v1alpha1.KindTimer:
+				tm, err := c.GetTimer(ctx, args[1])
+				if err != nil {
+					return err
+				}
+				events, err := eventsForTimer(ctx, c, tm)
+				if err != nil {
+					return err
+				}
+				describeTimer(out, tm, events)
 			}
 			return nil
 		},
@@ -255,4 +268,71 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// eventsForTimer returns Events regarding the Timer plus any regarding its
+// runs, so describe tells the full scheduling story.
+func eventsForTimer(ctx context.Context, c *client.Client, tm *v1alpha1.Timer) ([]v1alpha1.Event, error) {
+	procs, _, err := c.ListProcs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	owned := map[string]bool{tm.Metadata.Name: true}
+	for i := range procs {
+		if procs[i].Metadata.Labels[v1alpha1.LabelTimerName] == tm.Metadata.Name {
+			owned[procs[i].Metadata.Name] = true
+		}
+	}
+	all, _, err := c.ListEvents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []v1alpha1.Event
+	for i := range all {
+		if owned[all[i].Regarding.Name] {
+			out = append(out, all[i])
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].LastTimestamp.Before(out[j].LastTimestamp.Time)
+	})
+	return out, nil
+}
+
+func describeTimer(w io.Writer, tm *v1alpha1.Timer, events []v1alpha1.Event) {
+	fmt.Fprintf(w, "Name:\t%s\n", tm.Metadata.Name)
+	printLabels(w, tm.Metadata.Labels)
+	printAnnotations(w, tm.Metadata.Annotations)
+	fmt.Fprintf(w, "Created:\t%s\n", formatTime(tm.Metadata.CreationTimestamp))
+
+	fmt.Fprintf(w, "\nSchedule:\t%s\n", tm.Spec.Schedule)
+	suspend := "false"
+	if tm.Spec.Suspend != nil && *tm.Spec.Suspend {
+		suspend = "true"
+	}
+	fmt.Fprintf(w, "Suspend:\t%s\n", suspend)
+	fmt.Fprintf(w, "ConcurrencyPolicy:\t%s\n", tm.Spec.ConcurrencyPolicy)
+	if v := tm.Spec.StartingDeadlineSeconds; v != nil {
+		fmt.Fprintf(w, "StartingDeadlineSeconds:\t%d\n", *v)
+	}
+	fmt.Fprintf(w, "Command:\t%s\n", strings.Join(tm.Spec.Template.Spec.Command, " "))
+
+	fmt.Fprintf(w, "\nLast Schedule:\t%s\n", formatTime(tm.Status.LastScheduleTime))
+	fmt.Fprintf(w, "Last Successful:\t%s\n", formatTime(tm.Status.LastSuccessfulTime))
+	fmt.Fprintf(w, "Active Proc:\t%s\n", timerActive(tm))
+
+	// Next fire times, computed client-side; unparseable schedules are
+	// rejected at apply, so failure here means skew worth surfacing as-is.
+	if sched, err := cron.ParseStandard(tm.Spec.Schedule); err == nil {
+		next := time.Now()
+		fmt.Fprintf(w, "Next Runs:")
+		for range 3 {
+			next = sched.Next(next)
+			fmt.Fprintf(w, "\t%s", next.Format(time.RFC3339))
+		}
+		fmt.Fprintln(w)
+	}
+
+	printConditions(w, tm.Status.Conditions)
+	printEventsTail(w, events)
 }

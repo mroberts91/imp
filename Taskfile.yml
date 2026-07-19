@@ -170,6 +170,13 @@ tasks:
       - bash scripts/m4-acceptance.sh
     platforms: [linux]
 
+  accept:m5:
+    desc: Rootless M5 acceptance (Timer, log retention, top, completion, SIGTERM)
+    deps: [build]
+    cmds:
+      - bash scripts/m5-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

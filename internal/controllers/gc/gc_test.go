@@ -145,7 +145,7 @@ func TestReconcileDeletesOrphansAfterDaemonDelete(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
 
 	if err := c.DeleteDaemon(ctx, "web"); err != nil {
 		t.Fatalf("DeleteDaemon: %v", err)
@@ -173,7 +173,7 @@ func TestReconcileLeavesProcWithLiveOwner(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/"+p.Metadata.Name); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -196,7 +196,7 @@ func TestReconcileIgnoresUnownedProc(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/loner"); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -217,7 +217,7 @@ func TestReconcileFreshnessCheckSavesProcFromStaleCache(t *testing.T) {
 	// daemon. The live GetDaemon in the freshness check must save the proc.
 	staleDaemons := cache.NewInformer(c, v1alpha1.KindDaemon, func(string) {}, nil)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, staleDaemons.Store(), pInf.Store())
+	ctrl := gc.New(c, staleDaemons.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/"+p.Metadata.Name); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -275,9 +275,71 @@ func TestReconcileAbsentProcKeyIsNoop(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/ghost"); err != nil {
 		t.Fatalf("Reconcile of absent key = %v, want nil", err)
+	}
+}
+
+// Timer owners cascade exactly like Daemon owners (M5 generalization).
+func TestReconcileDeletesTimerOrphans(t *testing.T) {
+	c := startServer(t)
+	ctx := t.Context()
+
+	tm, err := c.ApplyTimer(ctx, &v1alpha1.Timer{
+		Metadata: v1alpha1.ObjectMeta{Name: "backup"},
+		Spec: v1alpha1.TimerSpec{
+			Schedule: "@every 1h",
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/true"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyTimer: %v", err)
+	}
+	run, err := c.ApplyProc(ctx, &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{
+			Name:   "backup-1234",
+			Labels: map[string]string{v1alpha1.LabelTimerName: "backup"},
+			OwnerReferences: []v1alpha1.OwnerReference{{
+				APIVersion: v1alpha1.APIVersion,
+				Kind:       v1alpha1.KindTimer,
+				Name:       "backup",
+				UID:        tm.Metadata.UID,
+			}},
+		},
+		Spec: *tm.Spec.Template.Spec.DeepCopy(),
+	})
+	if err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+
+	dInf := startInformer(t, c, v1alpha1.KindDaemon)
+	tInf := startInformer(t, c, v1alpha1.KindTimer)
+	pInf := startInformer(t, c, v1alpha1.KindProc)
+	ctrl := gc.New(c, dInf.Store(), tInf.Store(), pInf.Store())
+
+	// Owner alive: untouched.
+	if err := ctrl.Reconcile(ctx, "Proc/"+run.Metadata.Name); err != nil {
+		t.Fatalf("Reconcile with live timer: %v", err)
+	}
+	if !procExists(t, c, run.Metadata.Name) {
+		t.Fatal("proc deleted while its Timer owner was alive")
+	}
+
+	if err := c.DeleteTimer(ctx, "backup"); err != nil {
+		t.Fatalf("DeleteTimer: %v", err)
+	}
+	waitFor(t, "timer to leave the cache", func() bool {
+		_, ok := tInf.Store().GetByKey(v1alpha1.KindTimer + "/backup")
+		return !ok
+	})
+	if err := ctrl.Reconcile(ctx, "Proc/"+run.Metadata.Name); err != nil {
+		t.Fatalf("Reconcile after timer delete: %v", err)
+	}
+	if procExists(t, c, run.Metadata.Name) {
+		t.Fatal("orphaned timer run not deleted")
 	}
 }

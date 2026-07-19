@@ -31,6 +31,42 @@ Scrape `GET /metrics` on `--metrics-addr` (default `127.0.0.1:9090`).
 On a fake cgroup root, memory/cpu series may be present but are not
 kernel-backed.
 
+## Live usage: impctl top
+
+`impctl top` shows per-Proc CPU%, memory, and pid count read straight from
+impd's cgroup accounting over the socket — no metrics endpoint needed.
+CPU% comes from two samples one second apart. Under a fake cgroup root
+(rootless ad-hoc mode) values read as zero; real numbers need a delegated
+cgroup subtree (see `docs/install.md`).
+
+## Timers
+
+`Timer` objects replace cron entries: a 5-field cron expression or
+descriptor (`@hourly`, `@every 30s`) in host-local time fires one
+run-to-completion Proc per tick (`restartPolicy` Never or OnFailure).
+`concurrencyPolicy` defaults to Forbid — an overrunning job skips ticks
+with `SkippedRun` events rather than stacking. Ticks missed while impd was
+down are skipped with a `MissedRun` event (systemd `Persistent=false`
+posture; widen with `spec.startingDeadlineSeconds`). Finished runs are
+kept per `successfulHistoryLimit`/`failedHistoryLimit` (3/1) for
+`impctl logs <run>`; `impctl describe timer NAME` shows the next fire
+times and recent runs.
+
+## Log retention
+
+Per-Proc logs under `{data-dir}/logs/{proc}/` rotate at
+`spec.template.spec.logRetention` (`maxSizeMB` 10, `maxBackups` 3,
+`maxAgeDays` 0 = keep until backups retire them). The policy lives inside
+the hashed template, so editing it rolls the Daemon like any other spec
+change.
+
+## Shell completion
+
+`impctl completion bash|zsh|fish` emits the standard cobra script (e.g.
+`impctl completion bash > /etc/bash_completion.d/impctl`). Resource-name
+completion queries impd live and degrades silently when the socket is
+unreachable.
+
 ## Events and describe
 
 `impctl describe` and `impctl events --for kind/name` remain the primary

@@ -1,0 +1,29 @@
+# 08 — Scheduled runs: the Timer kind (imp's cron replacement).
+#
+# A Timer fires a run-to-completion Proc per schedule tick. Schedules are
+# standard 5-field cron or descriptors (@hourly, @daily, @every 30s),
+# evaluated in host-local time. Defaults filled by the api-server:
+#
+#   suspend: false
+#   concurrencyPolicy: Forbid      (skip a tick while a run is active;
+#                                   also Allow | Replace)
+#   successfulHistoryLimit: 3      (finished runs kept for inspection)
+#   failedHistoryLimit: 1
+#   restartPolicy: Never           (Timer templates: Never | OnFailure)
+#
+# Missed ticks (impd down past startingDeadlineSeconds, default a few
+# seconds) are skipped with a MissedRun event — systemd Persistent=false.
+#
+#   impctl apply -f examples/08-timer.yaml
+#   impctl get timers
+#   impctl describe timer stamp     # next fire times, recent runs
+#   impctl logs stamp-<unix>        # a finished run's output
+apiVersion: impd.sh/v1alpha1
+kind: Timer
+metadata:
+  name: stamp
+spec:
+  schedule: "@every 30s"
+  template:
+    spec:
+      command: ["sh", "-c", "date '+stamped %F %T'"]

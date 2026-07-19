@@ -44,6 +44,8 @@ events`); you never author it.
 | Advanced | [`05-replicas-and-labels.yaml`](05-replicas-and-labels.yaml) | Replicas, labels/annotations, Recreate updates, `IMP_REPLICA_INDEX` |
 | Advanced | [`06-full-stack.yaml`](06-full-stack.yaml) | Multi-document files, a multi-service app, every spec field |
 | Advanced | [`07-rolling-update.yaml`](07-rolling-update.yaml) | RollingUpdate: one ordinal at a time, high→low |
+| Advanced | [`08-timer.yaml`](08-timer.yaml) | Timer: scheduled run-to-completion Procs (cron replacement) |
+| Advanced | [`09-log-retention.yaml`](09-log-retention.yaml) | Per-daemon log rotation policy |
 
 Work through one:
 

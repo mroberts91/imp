@@ -391,3 +391,134 @@ func TestFieldErrorRendering(t *testing.T) {
 		}
 	}
 }
+
+func validTimer() *Timer {
+	tm := &Timer{
+		TypeMeta: TypeMeta{APIVersion: APIVersion, Kind: KindTimer},
+		Metadata: ObjectMeta{Name: "backup"},
+		Spec: TimerSpec{
+			Schedule: "*/5 * * * *",
+			Template: ProcTemplate{
+				Spec: ProcTemplateSpec{Command: []string{"/usr/bin/backup"}},
+			},
+		},
+	}
+	DefaultTimer(tm)
+	return tm
+}
+
+func TestValidateTimer(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*Timer)
+		wantFields []string
+	}{
+		{
+			name:   "valid",
+			mutate: func(*Timer) {},
+		},
+		{
+			name:   "descriptor schedule",
+			mutate: func(tm *Timer) { tm.Spec.Schedule = "@every 10s" },
+		},
+		{
+			name:       "missing schedule",
+			mutate:     func(tm *Timer) { tm.Spec.Schedule = "" },
+			wantFields: []string{"spec.schedule"},
+		},
+		{
+			name:       "unparseable schedule",
+			mutate:     func(tm *Timer) { tm.Spec.Schedule = "every day at noon" },
+			wantFields: []string{"spec.schedule"},
+		},
+		{
+			name:       "six-field schedule rejected",
+			mutate:     func(tm *Timer) { tm.Spec.Schedule = "0 0 12 * * *" },
+			wantFields: []string{"spec.schedule"},
+		},
+		{
+			name:       "unknown concurrency policy",
+			mutate:     func(tm *Timer) { tm.Spec.ConcurrencyPolicy = "Queue" },
+			wantFields: []string{"spec.concurrencyPolicy"},
+		},
+		{
+			name:       "negative starting deadline",
+			mutate:     func(tm *Timer) { tm.Spec.StartingDeadlineSeconds = new(int64(-1)) },
+			wantFields: []string{"spec.startingDeadlineSeconds"},
+		},
+		{
+			name: "negative history limits",
+			mutate: func(tm *Timer) {
+				tm.Spec.SuccessfulHistoryLimit = new(int32(-1))
+				tm.Spec.FailedHistoryLimit = new(int32(-2))
+			},
+			wantFields: []string{"spec.successfulHistoryLimit", "spec.failedHistoryLimit"},
+		},
+		{
+			name:       "restartPolicy Always rejected",
+			mutate:     func(tm *Timer) { tm.Spec.Template.Spec.RestartPolicy = RestartPolicyAlways },
+			wantFields: []string{"spec.template.spec.restartPolicy"},
+		},
+		{
+			name:   "restartPolicy OnFailure ok",
+			mutate: func(tm *Timer) { tm.Spec.Template.Spec.RestartPolicy = RestartPolicyOnFailure },
+		},
+		{
+			name:       "missing command",
+			mutate:     func(tm *Timer) { tm.Spec.Template.Spec.Command = nil },
+			wantFields: []string{"spec.template.spec.command"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := validTimer()
+			tc.mutate(tm)
+			errs := ValidateTimer(tm)
+			var gotFields []string
+			for _, e := range errs {
+				gotFields = append(gotFields, e.Field)
+			}
+			if len(gotFields) != len(tc.wantFields) {
+				t.Fatalf("got %d errors %v, want fields %v\nerrors: %v",
+					len(errs), gotFields, tc.wantFields, errs.ToAggregate())
+			}
+			for i, want := range tc.wantFields {
+				if gotFields[i] != want {
+					t.Errorf("error[%d].Field = %q, want %q", i, gotFields[i], want)
+				}
+			}
+			if len(tc.wantFields) == 0 && errs.ToAggregate() != nil {
+				t.Errorf("ToAggregate() = %v, want nil", errs.ToAggregate())
+			}
+		})
+	}
+}
+
+func TestValidateLogRetention(t *testing.T) {
+	d := validDaemon()
+	d.Spec.Template.Spec.LogRetention = &LogRetention{
+		MaxSizeMB:  new(int32(0)),
+		MaxBackups: new(int32(-1)),
+		MaxAgeDays: new(int32(-1)),
+	}
+	errs := ValidateDaemon(d)
+	want := []string{
+		"spec.template.spec.logRetention.maxSizeMB",
+		"spec.template.spec.logRetention.maxBackups",
+		"spec.template.spec.logRetention.maxAgeDays",
+	}
+	if len(errs) != len(want) {
+		t.Fatalf("got %d errors, want %d: %v", len(errs), len(want), errs.ToAggregate())
+	}
+	for i, w := range want {
+		if errs[i].Field != w {
+			t.Errorf("error[%d].Field = %q, want %q", i, errs[i].Field, w)
+		}
+	}
+
+	d = validDaemon()
+	d.Spec.Template.Spec.LogRetention = &LogRetention{MaxSizeMB: new(int32(1))}
+	if errs := ValidateDaemon(d); errs.ToAggregate() != nil {
+		t.Errorf("valid logRetention rejected: %v", errs.ToAggregate())
+	}
+}

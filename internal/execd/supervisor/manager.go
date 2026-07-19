@@ -6,8 +6,11 @@ package supervisor
 import (
 	"io"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 
+	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/cache"
 	"github.com/mroberts91/imp/internal/clock"
 	"github.com/mroberts91/imp/internal/execd/cgroups"
@@ -19,7 +22,7 @@ import (
 
 // LogCapture is the slice of execd/logs the supervisor needs.
 type LogCapture interface {
-	Open(procName string) (stdout, stderr io.WriteCloser, err error)
+	Open(procName string, retention *v1alpha1.LogRetention) (stdout, stderr io.WriteCloser, err error)
 	CloseCapture(procName string)
 	Remove(procName string) error
 }
@@ -92,6 +95,39 @@ func (m *Manager) ListProcCgroups() []metrics.ProcCgroup {
 	for _, s := range m.cgroupSnaps {
 		out = append(out, s)
 	}
+	return out
+}
+
+// ProcStats reads live cgroup stats for every Running Proc — the data
+// behind the api-server's /stats route (impctl top). It implements
+// apiserver.StatsProvider; wiring in cmd/impd is the compile-time check.
+// Observations only: nothing here touches the store (doc 08 M5-e).
+func (m *Manager) ProcStats() []v1alpha1.ProcStat {
+	snaps := m.ListProcCgroups()
+	now := v1alpha1.NewTime(m.clock.Now())
+	out := make([]v1alpha1.ProcStat, 0, len(snaps))
+	for _, s := range snaps {
+		st, err := m.cgroups.Stats(s.Path)
+		if err != nil {
+			// The Proc may have exited between the snapshot and the read.
+			continue
+		}
+		ps := v1alpha1.ProcStat{
+			Proc:               s.Proc,
+			CPUUsageUsec:       st.CPUUsageUsec,
+			MemoryCurrentBytes: st.MemoryCurrent,
+			PidsCurrent:        st.PidsCurrent,
+			SampledAt:          now,
+		}
+		switch {
+		case s.Daemon != "":
+			ps.Owner = v1alpha1.ObjectRef{Kind: v1alpha1.KindDaemon, Name: s.Daemon}
+		case s.Timer != "":
+			ps.Owner = v1alpha1.ObjectRef{Kind: v1alpha1.KindTimer, Name: s.Timer}
+		}
+		out = append(out, ps)
+	}
+	slices.SortFunc(out, func(a, b v1alpha1.ProcStat) int { return strings.Compare(a.Proc, b.Proc) })
 	return out
 }
 

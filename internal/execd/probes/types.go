@@ -18,6 +18,7 @@ import (
 type ProbeType string
 
 const (
+	ProbeStartup   ProbeType = "Startup"
 	ProbeLiveness  ProbeType = "Liveness"
 	ProbeReadiness ProbeType = "Readiness"
 )

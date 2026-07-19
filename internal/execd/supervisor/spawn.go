@@ -9,34 +9,69 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
-	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
+	"github.com/mroberts91/imp/internal/execd/childsetup"
 )
+
+// shimExe is what every Proc spawn execs (M6-a always-shim). /proc/self/exe
+// pins the running impd's inode, so the shim is the same build as this
+// supervisor even if the binary on disk was replaced mid-upgrade.
+const shimExe = "/proc/self/exe"
 
 // buildCmd constructs the Cmd for p without starting it. stdout/stderr must
 // already be open (log writers). Environment is explicit — never inherits
 // impd's env (supervisor information-leak discipline).
+//
+// The spawn goes through the childsetup shim: impd → /proc/self/exe →
+// execve(target). execve preserves pid, start ticks, process group, fds,
+// and cgroup membership, so everything downstream (D1 identity, pidfd,
+// probes, log capture) is oblivious to it. cmd.Dir still applies — os/exec
+// chdirs in the forked child before exec, and the shim inherits that.
 func buildCmd(p *v1alpha1.Proc, stdout, stderr io.Writer) (*exec.Cmd, error) {
 	if len(p.Spec.Command) == 0 {
 		return nil, fmt.Errorf("proc %s: empty command", p.Metadata.Name)
 	}
-	cmd := exec.Command(p.Spec.Command[0], p.Spec.Command[1:]...) //nolint:gosec // command comes from validated Proc spec
+	// Resolve the executable exactly as exec.Command did pre-shim: a name
+	// without a path separator goes through impd's own PATH; a name with
+	// one is left as written for the kernel to resolve after the chdir
+	// (workingDir-relative commands keep working).
+	exe := p.Spec.Command[0]
+	if !strings.Contains(exe, "/") {
+		resolved, err := exec.LookPath(exe)
+		if err != nil {
+			return nil, fmt.Errorf("proc %s: %w", p.Metadata.Name, err)
+		}
+		exe = resolved
+	}
+	// Pre-check identity parent-side so a misspelled user is a clean start
+	// error, not an exit-126 crash loop; the shim re-resolves for the drop.
+	if err := childsetup.CheckIdentity(p.Spec.User, p.Spec.Group); err != nil {
+		return nil, fmt.Errorf("proc %s: %w", p.Metadata.Name, err)
+	}
+	payload := childsetup.Payload{
+		Exe:            exe,
+		Argv:           p.Spec.Command,
+		User:           p.Spec.User,
+		Group:          p.Spec.Group,
+		Rlimits:        p.Spec.Rlimits,
+		Nice:           p.Spec.Nice,
+		OOMScoreAdjust: p.Spec.OOMScoreAdjust,
+		Umask:          p.Spec.Umask,
+	}
+	entry, err := payload.EnvEntry()
+	if err != nil {
+		return nil, fmt.Errorf("proc %s: %w", p.Metadata.Name, err)
+	}
+
+	cmd := exec.Command(shimExe)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Dir = p.Spec.WorkingDir
-	cmd.Env = buildEnv(p)
-
-	attr := &syscall.SysProcAttr{Setpgid: true}
-	if p.Spec.User != "" || p.Spec.Group != "" {
-		cred, err := resolveCredential(p.Spec.User, p.Spec.Group)
-		if err != nil {
-			return nil, err
-		}
-		attr.Credential = cred
-	}
-	cmd.SysProcAttr = attr
+	cmd.Env = append(buildEnv(p), entry)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, nil
 }
 
@@ -62,38 +97,4 @@ func buildEnv(p *v1alpha1.Proc) []string {
 		env = append(env, e.Name+"="+e.Value)
 	}
 	return env
-}
-
-func resolveCredential(userName, groupName string) (*syscall.Credential, error) {
-	cred := &syscall.Credential{}
-	if userName != "" {
-		u, err := user.Lookup(userName)
-		if err != nil {
-			return nil, fmt.Errorf("looking up user %q: %w", userName, err)
-		}
-		uid, err := strconv.ParseUint(u.Uid, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("parsing uid for %q: %w", userName, err)
-		}
-		cred.Uid = uint32(uid)
-		if groupName == "" {
-			gid, err := strconv.ParseUint(u.Gid, 10, 32)
-			if err != nil {
-				return nil, fmt.Errorf("parsing gid for %q: %w", userName, err)
-			}
-			cred.Gid = uint32(gid)
-		}
-	}
-	if groupName != "" {
-		g, err := user.LookupGroup(groupName)
-		if err != nil {
-			return nil, fmt.Errorf("looking up group %q: %w", groupName, err)
-		}
-		gid, err := strconv.ParseUint(g.Gid, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("parsing gid for %q: %w", groupName, err)
-		}
-		cred.Gid = uint32(gid)
-	}
-	return cred, nil
 }

@@ -204,18 +204,23 @@ func rollingPartition(d *v1alpha1.Daemon) int {
 
 // rollingUpdate performs one step of a StatefulSet-style roll: walk
 // ordinals high→low from replicas-1 down to partition; wait if a higher
-// ordinal's Proc is not Ready (or its slot state is unknown); delete at
-// most one stale Proc per call. done is true when no rolling work remains
-// for this pass (caller may scale). When done is false the status has
-// already been rolled up.
+// ordinal's Proc is not available (Ready for minReadySeconds — M6; or its
+// slot state is unknown); delete at most one stale Proc per call. done is
+// true when no rolling work remains for this pass (caller may scale). When
+// done is false the status has already been rolled up.
 func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, hash string, partition int) (done bool, err error) {
 	replicas := int(*d.Spec.Replicas)
 	byIndex := indexProcs(current, stale)
+	now := c.clock.Now()
 
 	for idx := replicas - 1; idx >= partition; idx-- {
 		slot := byIndex[idx]
+		available := false
+		if slot.current != nil {
+			available, _ = procAvailable(slot.current, d.Spec.MinReadySeconds, now)
+		}
 		switch {
-		case slot.current != nil && !procReady(slot.current):
+		case slot.current != nil && !available:
 			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
 				return false, err
 			}
@@ -446,6 +451,9 @@ const (
 	reasonMinReplicasUnavailable = "MinimumReplicasUnavailable"
 	reasonProcsAvailable         = "ProcsAvailable"
 	reasonProcsUpdated           = "ProcsUpdated"
+	// reasonProgressDeadlineExceeded is Progressing=False past the deadline
+	// (M6); shares its name with the Event reason.
+	reasonProgressDeadlineExceeded = v1alpha1.ReasonProgressDeadlineExceeded
 )
 
 // rollupStatus writes the Daemon's status from the Proc set observed at
@@ -453,6 +461,14 @@ const (
 // short-circuit absorbs identical bodies with zero resourceVersion churn.
 // partition gates Progressing completion under RollingUpdate (stale below
 // partition is intentional).
+//
+// M6 additions: availableReplicas (Ready for minReadySeconds) drives the
+// Available condition; the progress deadline flips Progressing to
+// False/ProgressDeadlineExceeded when its lastUpdateTime — bumped by
+// SetStatusCondition on every recorded change, frozen on stalls — falls
+// progressDeadlineSeconds behind. Time-driven flips (a proc maturing to
+// available, the deadline firing) get a RequeueAfter, since no watch event
+// announces the passage of time.
 func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, partition int) error {
 	name := d.Metadata.Name
 	gen := d.Metadata.Generation
@@ -460,42 +476,57 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 
 	total := int32(len(current) + len(stale))
 	updated := int32(len(current))
-	var ready int32
+	nowT := c.clock.Now()
+	var ready, available int32
+	var recheckIn time.Duration // soonest ready→available maturation; 0 = none pending
 	for _, set := range [][]v1alpha1.Proc{current, stale} {
 		for i := range set {
-			if procReady(&set[i]) {
-				ready++
+			if !procReady(&set[i]) {
+				continue
+			}
+			ready++
+			ok, in := procAvailable(&set[i], d.Spec.MinReadySeconds, nowT)
+			if ok {
+				available++
+			} else if recheckIn == 0 || in < recheckIn {
+				recheckIn = in
 			}
 		}
 	}
 
-	now := v1alpha1.NewTime(c.clock.Now())
+	now := v1alpha1.NewTime(nowT)
 	avail := v1alpha1.Condition{
 		Type:               v1alpha1.ConditionTypeAvailable,
 		Status:             v1alpha1.ConditionFalse,
 		Reason:             reasonMinReplicasUnavailable,
-		Message:            "waiting for procs to become ready",
+		Message:            fmt.Sprintf("waiting for procs to become available (%d/%d)", available, replicas),
 		ObservedGeneration: gen,
 		LastTransitionTime: now,
+		LastUpdateTime:     now,
 	}
-	if ready >= replicas {
+	if available >= replicas {
 		avail.Status = v1alpha1.ConditionTrue
 		avail.Reason = reasonMinReplicasAvailable
 		avail.Message = "minimum number of replicas is available"
 	}
 
-	// Progressing=False needs a progress deadline - deferred, out of M1
-	// scope. True/ProcsAvailable is the terminal complete state (mirrors
-	// the deployment controller's NewReplicaSetAvailable).
+	complete := rolloutComplete(current, stale, int(replicas), partition, d.Spec.MinReadySeconds, nowT)
+	// The counts in the message are load-bearing: any real progress changes
+	// it, which bumps the condition's lastUpdateTime; a stalled roll leaves
+	// it identical, freezing the anchor the deadline measures against.
 	prog := v1alpha1.Condition{
-		Type:               v1alpha1.ConditionTypeProgressing,
-		Status:             v1alpha1.ConditionTrue,
-		Reason:             reasonProcsUpdated,
-		Message:            "rollout of the current template is in progress",
+		Type:   v1alpha1.ConditionTypeProgressing,
+		Status: v1alpha1.ConditionTrue,
+		Reason: reasonProcsUpdated,
+		Message: fmt.Sprintf("rollout in progress: %d/%d updated, %d available",
+			updated, replicas, available),
 		ObservedGeneration: gen,
 		LastTransitionTime: now,
+		LastUpdateTime:     now,
 	}
-	if rolloutComplete(current, stale, int(replicas), partition) {
+	if complete {
+		// True/ProcsAvailable is the terminal complete state (mirrors the
+		// deployment controller's NewReplicaSetAvailable).
 		prog.Reason = reasonProcsAvailable
 		prog.Message = "all procs are updated and available"
 		if len(stale) > 0 {
@@ -507,7 +538,10 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 		}
 	}
 
+	exceededNow := false         // the deadline flipped Progressing this pass
+	var deadlineIn time.Duration // time until the deadline would fire; 0 = not armed
 	err := client.RetryOnConflict(func() error {
+		exceededNow, deadlineIn = false, 0
 		fresh, err := c.client.GetDaemon(ctx, name)
 		if err != nil {
 			return err
@@ -525,8 +559,43 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 		fresh.Status.Replicas = total
 		fresh.Status.UpdatedReplicas = updated
 		fresh.Status.ReadyReplicas = ready
+		fresh.Status.AvailableReplicas = available
 		v1alpha1.SetStatusCondition(&fresh.Status.Conditions, avail)
-		v1alpha1.SetStatusCondition(&fresh.Status.Conditions, prog)
+
+		// An exceeded state is sticky only within its generation: a spec
+		// change is a new rollout and gets a fresh deadline (the Deployment
+		// posture — SetStatusCondition re-anchors lastUpdateTime when the
+		// True/ProcsUpdated condition below records the change).
+		stored := v1alpha1.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionTypeProgressing)
+		alreadyExceeded := !complete && stored != nil &&
+			stored.Status == v1alpha1.ConditionFalse && stored.Reason == reasonProgressDeadlineExceeded &&
+			stored.ObservedGeneration == gen
+		if !alreadyExceeded {
+			// Record this pass's progress (or completion) first, so real
+			// progress bumps lastUpdateTime before the deadline is judged.
+			v1alpha1.SetStatusCondition(&fresh.Status.Conditions, prog)
+			if !complete {
+				cur := v1alpha1.FindStatusCondition(fresh.Status.Conditions, v1alpha1.ConditionTypeProgressing)
+				if pds := d.Spec.ProgressDeadlineSeconds; pds != nil && cur != nil && !cur.LastUpdateTime.IsZero() {
+					deadline := cur.LastUpdateTime.Add(time.Duration(*pds) * time.Second)
+					if nowT.Before(deadline) {
+						deadlineIn = deadline.Sub(nowT)
+					} else {
+						v1alpha1.SetStatusCondition(&fresh.Status.Conditions, v1alpha1.Condition{
+							Type:   v1alpha1.ConditionTypeProgressing,
+							Status: v1alpha1.ConditionFalse,
+							Reason: reasonProgressDeadlineExceeded,
+							Message: fmt.Sprintf("rollout has made no progress for %ds: %d/%d updated, %d available",
+								*pds, updated, replicas, available),
+							ObservedGeneration: gen,
+							LastTransitionTime: now,
+							LastUpdateTime:     now,
+						})
+						exceededNow = true
+					}
+				}
+			}
+		}
 		_, err = c.client.UpdateDaemonStatus(ctx, fresh)
 		return err
 	})
@@ -537,20 +606,37 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 	if err != nil {
 		return fmt.Errorf("updating status of %s/%s: %w", v1alpha1.KindDaemon, name, err)
 	}
+	if exceededNow {
+		// The deadline is a report, not a brake: reconciliation continues,
+		// and the complete path above recovers the condition if the world
+		// converges later.
+		c.emitWarning(ctx, d, v1alpha1.ReasonProgressDeadlineExceeded,
+			fmt.Sprintf("rollout has made no progress for %ds", *d.Spec.ProgressDeadlineSeconds))
+	}
+	// Wake up for whichever time-driven flip comes first.
+	switch {
+	case recheckIn > 0 && (deadlineIn == 0 || recheckIn < deadlineIn):
+		return controllers.RequeueAfter{After: recheckIn}
+	case deadlineIn > 0:
+		return controllers.RequeueAfter{After: deadlineIn}
+	}
 	return nil
 }
 
 // rolloutComplete reports whether every ordinal in [partition, replicas)
-// has a current-hash Ready Proc, and there is no stale Proc at those
+// has a current-hash available Proc, and there is no stale Proc at those
 // ordinals. Stale Procs below partition are intentional under RollingUpdate.
-func rolloutComplete(current, stale []v1alpha1.Proc, replicas, partition int) bool {
+func rolloutComplete(current, stale []v1alpha1.Proc, replicas, partition int, minReady int32, now time.Time) bool {
 	if replicas == 0 {
 		return len(current) == 0 && len(stale) == 0
 	}
 	byIndex := indexProcs(current, stale)
 	for idx := partition; idx < replicas; idx++ {
 		slot := byIndex[idx]
-		if slot.stale != nil || slot.current == nil || !procReady(slot.current) {
+		if slot.stale != nil || slot.current == nil {
+			return false
+		}
+		if ok, _ := procAvailable(slot.current, minReady, now); !ok {
 			return false
 		}
 	}
@@ -575,4 +661,28 @@ func procReady(p *v1alpha1.Proc) bool {
 		return c.Status == v1alpha1.ConditionTrue
 	}
 	return p.Status.Phase == v1alpha1.ProcPhaseRunning
+}
+
+// procAvailable reports whether p counts toward availableReplicas: Ready
+// for at least minReadySeconds, measured against the Ready condition's
+// lastTransitionTime (the Deployment rule). When Ready but not yet mature,
+// recheckIn is how long until it would become available. Procs counted via
+// the M1-era phase fallback (no Ready condition) have no transition time to
+// measure and count as available immediately.
+func procAvailable(p *v1alpha1.Proc, minReady int32, now time.Time) (available bool, recheckIn time.Duration) {
+	c := v1alpha1.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionTypeReady)
+	if c == nil {
+		return p.Status.Phase == v1alpha1.ProcPhaseRunning, 0
+	}
+	if c.Status != v1alpha1.ConditionTrue {
+		return false, 0
+	}
+	if minReady <= 0 || c.LastTransitionTime.IsZero() {
+		return true, 0
+	}
+	availableAt := c.LastTransitionTime.Add(time.Duration(minReady) * time.Second)
+	if now.Before(availableAt) {
+		return false, availableAt.Sub(now)
+	}
+	return true, 0
 }

@@ -7,8 +7,9 @@ toward it — restarts, replicas, updates, and cleanup included.
 The examples here are a tutorial. Each file is self-contained and commented;
 read them in order.
 
-> **Status:** M1–M4 are complete. Controllers expand Daemons into Procs;
-> execd starts and restarts them; RollingUpdate and `IMP_REPLICA_INDEX` work.
+> **Status:** M1–M6 are complete. Controllers expand Daemons into Procs;
+> execd starts and restarts them; RollingUpdate, Timers, hardening fields,
+> and the `restart`/`run`/`rollout status` verbs all work.
 > Try the “watch it run” commands below.
 
 ## Setup
@@ -46,6 +47,8 @@ events`); you never author it.
 | Advanced | [`07-rolling-update.yaml`](07-rolling-update.yaml) | RollingUpdate: one ordinal at a time, high→low |
 | Advanced | [`08-timer.yaml`](08-timer.yaml) | Timer: scheduled run-to-completion Procs (cron replacement) |
 | Advanced | [`09-log-retention.yaml`](09-log-retention.yaml) | Per-daemon log rotation policy |
+| Advanced | [`10-hardened-daemon.yaml`](10-hardened-daemon.yaml) | Unit-file hardening: `rlimits`, `nice`, `oomScoreAdjust`, `umask`, `limits.cpu` |
+| Advanced | [`11-startup-probe.yaml`](11-startup-probe.yaml) | `startupProbe`: protecting slow starters from liveness |
 
 Work through one:
 

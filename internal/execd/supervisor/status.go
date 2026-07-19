@@ -79,6 +79,13 @@ func readyCondition(phase v1alpha1.ProcPhase, state v1alpha1.ProcState, gen int6
 		Message:            "proc is not running",
 	}
 	if phase == v1alpha1.ProcPhaseRunning {
+		// Startup gate (M6): nothing is Ready until the startup probe
+		// succeeds, regardless of readiness configuration.
+		if rt != nil && rt.HasStartupProbe && !rt.StartupDone {
+			cond.Reason = v1alpha1.ReadyReasonProbePending
+			cond.Message = "waiting for startup probe"
+			return cond
+		}
 		if rt != nil && rt.HasReadinessProbe {
 			if rt.ReadinessOK {
 				cond.Status = v1alpha1.ConditionTrue

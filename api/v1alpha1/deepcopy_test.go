@@ -42,6 +42,13 @@ func TestDaemonDeepCopy(t *testing.T) {
 	*cp.Spec.Template.Spec.Resources.Limits.CPUWeight = 1
 	cp.Spec.Template.Spec.LivenessProbe.Exec.Command[0] = "/mutated"
 	cp.Spec.Template.Spec.ReadinessProbe.HTTPGet.HTTPHeaders[0].Value = "mutated"
+	*cp.Spec.ProgressDeadlineSeconds = 1
+	cp.Spec.Template.Spec.StartupProbe.Exec.Command[0] = "/mutated"
+	*cp.Spec.Template.Spec.Rlimits[0].Soft = 1
+	*cp.Spec.Template.Spec.Rlimits[0].Hard = 1
+	*cp.Spec.Template.Spec.Nice = -1
+	*cp.Spec.Template.Spec.OOMScoreAdjust = 1
+	*cp.Spec.Template.Spec.Umask = "0777"
 	cp.Status.Conditions[0].Status = ConditionTrue
 
 	if after := snapshot(t, orig); after != before {

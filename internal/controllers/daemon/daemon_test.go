@@ -157,7 +157,10 @@ func (h *harness) waitCaughtUp(t *testing.T) {
 }
 
 // reconcileUntilSteady drives Reconcile until a pass changes nothing on
-// the server (no proc mutations, status write absorbed as a no-op).
+// the server (no proc mutations, status write absorbed as a no-op). A
+// RequeueAfter with an unchanged server also counts as steady: since M6 an
+// incomplete rollout at rest always schedules a progress-deadline (or
+// availability) wake-up, which is a timer, not pending work.
 func (h *harness) reconcileUntilSteady(t *testing.T, key string) {
 	t.Helper()
 	for range 10 {
@@ -165,10 +168,8 @@ func (h *harness) reconcileUntilSteady(t *testing.T, key string) {
 		before := h.serverSnapshot(t)
 		err := h.c.Reconcile(t.Context(), key)
 		var requeue controllers.RequeueAfter
-		if errors.As(err, &requeue) {
-			continue
-		}
-		if err != nil {
+		requeued := errors.As(err, &requeue)
+		if err != nil && !requeued {
 			t.Fatalf("Reconcile(%s): %v", key, err)
 		}
 		h.waitCaughtUp(t)
@@ -433,10 +434,11 @@ func TestReconcileStatusRollupConvergesWithoutChurn(t *testing.T) {
 
 	// A later pass with the clock advanced must be a no-op: same
 	// resourceVersion (etcl absorbed the identical body) and an
-	// untouched transition time.
+	// untouched transition time. (The pass returns a deadline requeue —
+	// the rollout is incomplete — which is a timer, not a write.)
 	h.clk.Step(90 * time.Second)
 	h.waitCaughtUp(t)
-	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}
 
@@ -565,7 +567,7 @@ func TestReconcileRollingUpdateSequential(t *testing.T) {
 
 	// Pass 2: create replacement at ordinal 2; do not delete ordinal 1 yet
 	// because the new ordinal-2 Proc is not Ready.
-	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
 		t.Fatalf("Reconcile create replacement: %v", err)
 	}
 	h.waitCaughtUp(t)
@@ -606,16 +608,12 @@ func TestReconcileRollingUpdateSequential(t *testing.T) {
 		}
 	}
 
-	// Drive to completion: create, mark Ready, roll next ordinal.
+	// Drive to completion: create, mark Ready, roll next ordinal. Requeues
+	// are expected (delete passes and the deadline timer) and never skip
+	// the mark-Ready step.
 	for range 15 {
 		h.waitCaughtUp(t)
-		err := h.c.Reconcile(ctx, "Daemon/web")
-		var rq controllers.RequeueAfter
-		if errors.As(err, &rq) {
-			h.waitCaughtUp(t)
-			continue
-		}
-		if err != nil {
+		if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 		h.waitCaughtUp(t)
@@ -639,11 +637,8 @@ func TestReconcileRollingUpdateSequential(t *testing.T) {
 			continue
 		}
 		// One more pass so rollup sees Ready.
-		if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
-			var rq2 controllers.RequeueAfter
-			if !errors.As(err, &rq2) {
-				t.Fatalf("final Reconcile: %v", err)
-			}
+		if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+			t.Fatalf("final Reconcile: %v", err)
 		}
 		h.waitCaughtUp(t)
 		d, err = h.cl.GetDaemon(ctx, "web")
@@ -680,26 +675,19 @@ func TestReconcileRollingUpdatePartition(t *testing.T) {
 		t.Fatalf("ApplyDaemon: %v", err)
 	}
 
-	// Drive roll for ordinals >= 1 only.
+	// Drive roll for ordinals >= 1 only. Requeues never skip the
+	// mark-Ready step (creation passes requeue for the deadline too).
 	for range 20 {
 		h.waitCaughtUp(t)
-		err := h.c.Reconcile(ctx, "Daemon/web")
-		var rq controllers.RequeueAfter
-		if errors.As(err, &rq) {
-			continue
-		}
-		if err != nil {
+		if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 		h.waitCaughtUp(t)
 		markProcsReady(t, h)
 	}
 	h.waitCaughtUp(t)
-	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
-		var rq controllers.RequeueAfter
-		if !errors.As(err, &rq) {
-			t.Fatalf("final Reconcile: %v", err)
-		}
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("final Reconcile: %v", err)
 	}
 	h.waitCaughtUp(t)
 
@@ -740,6 +728,17 @@ func procNames(procs []v1alpha1.Proc) []string {
 	return out
 }
 
+// ignoreRequeue strips the RequeueAfter sentinel: since M6 any incomplete
+// rollout schedules a progress-deadline (or availability) wake-up, so
+// passes that used to return nil may return a timer instead. Real errors
+// pass through.
+func ignoreRequeue(err error) error {
+	if _, ok := errors.AsType[controllers.RequeueAfter](err); ok {
+		return nil
+	}
+	return err
+}
+
 // A rolling pass that creates replacement Procs must stop there: the
 // informer has not observed the creations yet, so continuing into the
 // rolling walk would see their ordinals as empty slots and delete a second
@@ -771,12 +770,13 @@ func TestReconcileRollingUpdateCreationPassDeletesNothing(t *testing.T) {
 	}
 	h.waitCaughtUp(t)
 
-	// Pass 2 creates the ordinal-2 replacement. It must return nil (wait
-	// for the new Proc, no requeue-driven walk) and must not have deleted
-	// anything: both stale lower ordinals are still on the server,
-	// regardless of whether the informer observed the creation.
-	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
-		t.Fatalf("creation pass returned %v, want nil", err)
+	// Pass 2 creates the ordinal-2 replacement. It must stop there — no
+	// requeue-driven walk into a second delete; the only acceptable
+	// non-nil return is the progress-deadline timer. It must not have
+	// deleted anything: both stale lower ordinals are still on the
+	// server, regardless of whether the informer observed the creation.
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("creation pass returned %v, want nil or a deadline requeue", err)
 	}
 	procs := listProcsSorted(t, h)
 	if len(procs) != 3 {
@@ -814,7 +814,7 @@ func TestReconcileScaleUpFillsLowestFreeIndex(t *testing.T) {
 	}
 	h.waitCaughtUp(t)
 
-	if err := h.c.Reconcile(ctx, "Daemon/web"); err != nil {
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
 	indices := map[string]bool{}
@@ -862,5 +862,316 @@ func TestRollupStatusSkipsRecreatedDaemon(t *testing.T) {
 	}
 	if got.Status.ObservedGeneration != 0 || got.Status.Replicas != 0 || len(got.Status.Conditions) != 0 {
 		t.Fatalf("stale incarnation's status was written onto the new object: %+v", got.Status)
+	}
+}
+
+// markProcsReadyAt is markProcsReady with an explicit Ready transition time,
+// for minReadySeconds tests that measure availability from it.
+func markProcsReadyAt(t *testing.T, h *harness, at time.Time) {
+	t.Helper()
+	ctx := t.Context()
+	procs, _, err := h.cl.ListProcs(ctx)
+	if err != nil {
+		t.Fatalf("ListProcs: %v", err)
+	}
+	for i := range procs {
+		p := &procs[i]
+		p.Status.Phase = v1alpha1.ProcPhaseRunning
+		v1alpha1.SetStatusCondition(&p.Status.Conditions, v1alpha1.Condition{
+			Type:               v1alpha1.ConditionTypeReady,
+			Status:             v1alpha1.ConditionTrue,
+			Reason:             "TestReady",
+			LastTransitionTime: v1alpha1.NewTime(at),
+		})
+		if _, err := h.cl.UpdateProcStatus(ctx, p); err != nil {
+			t.Fatalf("UpdateProcStatus(%s): %v", p.Metadata.Name, err)
+		}
+	}
+	h.waitCaughtUp(t)
+}
+
+func getDaemonProgressing(t *testing.T, h *harness) (*v1alpha1.Daemon, *v1alpha1.Condition) {
+	t.Helper()
+	d, err := h.cl.GetDaemon(t.Context(), "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	prog := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeProgressing)
+	if prog == nil {
+		t.Fatal("no Progressing condition")
+	}
+	return d, prog
+}
+
+// TestProgressDeadlineExceededFlipsOnceAndRecovers pins the M6 deadline:
+// a stalled rollout flips Progressing to False/ProgressDeadlineExceeded
+// exactly once (one Warning event), later passes keep the exceeded state,
+// and convergence recovers it to True/ProcsAvailable.
+func TestProgressDeadlineExceededFlipsOnceAndRecovers(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: "web"},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas:                new(int32(1)),
+			ProgressDeadlineSeconds: new(int32(30)),
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}},
+			},
+		},
+	}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	_, prog := getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionTrue || prog.Reason != reasonProcsUpdated {
+		t.Fatalf("Progressing = %s/%s, want True/%s", prog.Status, prog.Reason, reasonProcsUpdated)
+	}
+	if prog.LastUpdateTime.IsZero() {
+		t.Fatal("Progressing.lastUpdateTime not stamped")
+	}
+
+	// The pass at rest must schedule the deadline wake-up.
+	h.waitCaughtUp(t)
+	rq, ok := errors.AsType[controllers.RequeueAfter](h.c.Reconcile(ctx, "Daemon/web"))
+	if !ok {
+		t.Fatal("incomplete rollout did not schedule a deadline requeue")
+	}
+	if rq.After <= 0 || rq.After > 30*time.Second {
+		t.Fatalf("deadline requeue = %v, want (0, 30s]", rq.After)
+	}
+
+	// No progress for 31s: the deadline fires.
+	h.clk.Step(31 * time.Second)
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile past deadline: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionFalse || prog.Reason != reasonProgressDeadlineExceeded {
+		t.Fatalf("Progressing = %s/%s, want False/%s", prog.Status, prog.Reason, reasonProgressDeadlineExceeded)
+	}
+	ev := findEvent(t, h, v1alpha1.ReasonProgressDeadlineExceeded)
+	if ev == nil {
+		t.Fatal("no ProgressDeadlineExceeded event")
+	}
+	if ev.Type != v1alpha1.EventTypeWarning {
+		t.Errorf("event type = %s, want Warning", ev.Type)
+	}
+
+	// Further passes keep the exceeded state and do not re-emit.
+	h.clk.Step(time.Minute)
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile while exceeded: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionFalse || prog.Reason != reasonProgressDeadlineExceeded {
+		t.Fatalf("exceeded state not sticky: %s/%s", prog.Status, prog.Reason)
+	}
+	if ev := findEvent(t, h, v1alpha1.ReasonProgressDeadlineExceeded); ev == nil || ev.Count > 1 {
+		t.Fatalf("event re-emitted while already exceeded: %+v", ev)
+	}
+
+	// The world converges: the condition recovers.
+	markProcsReady(t, h)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile after convergence: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionTrue || prog.Reason != reasonProcsAvailable {
+		t.Fatalf("Progressing = %s/%s, want recovered True/%s", prog.Status, prog.Reason, reasonProcsAvailable)
+	}
+}
+
+// TestProgressDeadlineReanchorsOnProgress pins the lastUpdateTime anchor:
+// real progress (count changes in the message) bumps it, restarting the
+// deadline window; a stall freezes it.
+func TestProgressDeadlineReanchorsOnProgress(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: "web"},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas:                new(int32(2)),
+			ProgressDeadlineSeconds: new(int32(30)),
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}},
+			},
+		},
+	}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	h.reconcileUntilSteady(t, "Daemon/web")
+	_, prog := getDaemonProgressing(t, h)
+	anchor := prog.LastUpdateTime
+
+	// 20s in, one proc becomes ready: progress bumps the anchor.
+	h.clk.Step(20 * time.Second)
+	applied, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	hash := v1alpha1.HashProcTemplate(&applied.Spec.Template)
+	markProcsReady(t, h, "web-0-"+hash)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if !prog.LastUpdateTime.After(anchor.Time) {
+		t.Fatalf("lastUpdateTime did not advance on progress: %v -> %v", anchor, prog.LastUpdateTime)
+	}
+	if prog.Status != v1alpha1.ConditionTrue {
+		t.Fatalf("Progressing flipped early: %s/%s", prog.Status, prog.Reason)
+	}
+
+	// 20 more seconds (40 total, but only 20 since the re-anchor): still True.
+	h.clk.Step(20 * time.Second)
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionTrue {
+		t.Fatalf("deadline measured from the wrong anchor: %s/%s", prog.Status, prog.Reason)
+	}
+
+	// 11 more with no progress (31 since re-anchor): flips.
+	h.clk.Step(11 * time.Second)
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionFalse || prog.Reason != reasonProgressDeadlineExceeded {
+		t.Fatalf("Progressing = %s/%s, want False/%s", prog.Status, prog.Reason, reasonProgressDeadlineExceeded)
+	}
+}
+
+// TestMinReadySecondsGatesAvailability pins M6 availability: a Ready proc
+// counts as available only after minReadySeconds, the controller schedules
+// the maturation wake-up, and Available flips without any further object
+// change.
+func TestMinReadySecondsGatesAvailability(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: "web"},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas:        new(int32(1)),
+			MinReadySeconds: 5,
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}},
+			},
+		},
+	}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	markProcsReadyAt(t, h, h.clk.Now())
+	rq, ok := errors.AsType[controllers.RequeueAfter](h.c.Reconcile(ctx, "Daemon/web"))
+	if !ok {
+		t.Fatal("ready-but-not-available proc did not schedule a maturation requeue")
+	}
+	if rq.After <= 0 || rq.After > 5*time.Second {
+		t.Fatalf("maturation requeue = %v, want (0, 5s]", rq.After)
+	}
+	h.waitCaughtUp(t)
+	got, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	if got.Status.ReadyReplicas != 1 || got.Status.AvailableReplicas != 0 {
+		t.Fatalf("ready/available = %d/%d, want 1/0 before minReadySeconds",
+			got.Status.ReadyReplicas, got.Status.AvailableReplicas)
+	}
+	avail := v1alpha1.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionTypeAvailable)
+	if avail == nil || avail.Status != v1alpha1.ConditionFalse {
+		t.Fatalf("Available = %+v, want False before minReadySeconds", avail)
+	}
+
+	// Nothing changes but time: the proc matures.
+	h.clk.Step(6 * time.Second)
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile after maturation: %v", err)
+	}
+	h.waitCaughtUp(t)
+	got, err = h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	if got.Status.AvailableReplicas != 1 {
+		t.Fatalf("availableReplicas = %d, want 1 after minReadySeconds", got.Status.AvailableReplicas)
+	}
+	avail = v1alpha1.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionTypeAvailable)
+	if avail == nil || avail.Status != v1alpha1.ConditionTrue {
+		t.Fatalf("Available = %+v, want True after minReadySeconds", avail)
+	}
+}
+
+// TestProgressDeadlineResetsOnNewGeneration pins that an exceeded
+// Progressing condition is sticky only within its generation: a spec change
+// is a new rollout and gets a fresh deadline (Deployment posture).
+func TestProgressDeadlineResetsOnNewGeneration(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: "web"},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas:                new(int32(1)),
+			ProgressDeadlineSeconds: new(int32(30)),
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}},
+			},
+		},
+	}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	h.reconcileUntilSteady(t, "Daemon/web")
+	h.clk.Step(31 * time.Second)
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile past deadline: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog := getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionFalse || prog.Reason != reasonProgressDeadlineExceeded {
+		t.Fatalf("setup: Progressing = %s/%s, want exceeded", prog.Status, prog.Reason)
+	}
+
+	// A spec change (generation bump) resets the rollout and its deadline.
+	applied, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	applied.Spec.Template.Spec.Command = []string{"/bin/sleep", "90"}
+	if _, err := h.cl.ApplyDaemon(ctx, applied); err != nil {
+		t.Fatalf("ApplyDaemon(new template): %v", err)
+	}
+	h.waitCaughtUp(t)
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile of new generation: %v", err)
+	}
+	h.waitCaughtUp(t)
+	_, prog = getDaemonProgressing(t, h)
+	if prog.Status != v1alpha1.ConditionTrue {
+		t.Fatalf("new generation did not reset the exceeded state: %s/%s", prog.Status, prog.Reason)
 	}
 }

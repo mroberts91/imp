@@ -11,6 +11,7 @@ package timer
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"path/filepath"
@@ -356,7 +357,7 @@ func TestTimerHistoryPruning(t *testing.T) {
 	var names []string
 	for i := range 3 {
 		at := base.Add(time.Duration(i) * time.Hour)
-		p := newRunProc(applied, at)
+		p := BuildRun(applied, at, false)
 		created, err := h.cl.ApplyProc(ctx, p)
 		if err != nil {
 			t.Fatalf("seeding run: %v", err)
@@ -381,4 +382,60 @@ func TestTimerHistoryPruning(t *testing.T) {
 		}
 		t.Fatalf("after pruning got %v, want only newest %s", got, names[2])
 	}
+}
+
+// TestTimerManualRun pins M6-d: a manual run (BuildRun manual=true) carries
+// the manual annotation and infixed name, counts as active for Forbid, and
+// never advances lastScheduleTime.
+func TestTimerManualRun(t *testing.T) {
+	h := startHarness(t)
+	applied := applyTimer(t, h, nil)
+	ctx := t.Context()
+
+	// Build and apply the manual run exactly as impctl run does.
+	at := h.clk.Now()
+	p := BuildRun(applied, at, true)
+	wantName := fmt.Sprintf("backup-manual-%d", at.Unix())
+	if p.Metadata.Name != wantName {
+		t.Fatalf("manual run name = %q, want %q", p.Metadata.Name, wantName)
+	}
+	if p.Metadata.Annotations[v1alpha1.AnnotationManual] != "true" {
+		t.Fatal("manual run missing the impd.sh/manual annotation")
+	}
+	if p.Metadata.Labels[v1alpha1.LabelTimerName] != "backup" {
+		t.Fatal("manual run missing the timer-name label")
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	h.waitCaughtUp(t)
+
+	// A reconcile before any tick: the manual run is active (status
+	// rollup), but lastScheduleTime stays untouched — manual runs are not
+	// schedule bookkeeping.
+	var rq controllers.RequeueAfter
+	if err := reconcile(t, h); err != nil && !errors.As(err, &rq) {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	got, err := h.cl.GetTimer(ctx, "backup")
+	if err != nil {
+		t.Fatalf("GetTimer: %v", err)
+	}
+	if !got.Status.LastScheduleTime.IsZero() {
+		t.Fatalf("manual run advanced lastScheduleTime to %v", got.Status.LastScheduleTime)
+	}
+	if got.Status.ActiveProc != wantName {
+		t.Fatalf("status.activeProc = %q, want the manual run %q", got.Status.ActiveProc, wantName)
+	}
+
+	// A scheduled tick arrives while the manual run is active: Forbid
+	// treats it as a real run and skips the tick.
+	h.clk.Step(time.Hour + 2*time.Second)
+	if err := reconcile(t, h); !errors.As(err, &rq) {
+		t.Fatalf("skip pass = %v, want RequeueAfter", err)
+	}
+	if n := len(listRuns(t, h)); n != 1 {
+		t.Fatalf("Forbid did not treat the manual run as active (%d runs)", n)
+	}
+	waitFor(t, "SkippedRun event", func() bool { return hasEvent(t, h, v1alpha1.ReasonSkippedRun) })
 }

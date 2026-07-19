@@ -295,6 +295,143 @@ func TestValidateDaemon(t *testing.T) {
 			},
 			wantFields: []string{"spec.template.spec.readinessProbe.exec.command"},
 		},
+		{
+			name: "bad cpu quantity",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Resources.Limits.CPU = "0.5"
+			},
+			wantFields: []string{"spec.template.spec.resources.limits.cpu"},
+		},
+		{
+			name: "cpu millicores ok",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Resources.Limits.CPU = "500m"
+			},
+			wantFields: nil,
+		},
+		{
+			name: "startup probe successThreshold must be 1",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.StartupProbe = &Probe{
+					Exec:             &ExecAction{Command: []string{"true"}},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 2,
+					FailureThreshold: 3,
+				}
+			},
+			wantFields: []string{"spec.template.spec.startupProbe.successThreshold"},
+		},
+		{
+			name: "rlimits ok",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{
+					{Resource: "nofile", Soft: new(int64(65536))},
+					{Resource: "core", Soft: new(int64(0)), Hard: new(RlimitInfinity)},
+				}
+			},
+			wantFields: nil,
+		},
+		{
+			name: "rlimit unknown resource",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{{Resource: "NOFILE", Soft: new(int64(1))}}
+			},
+			wantFields: []string{"spec.template.spec.rlimits[0].resource"},
+		},
+		{
+			name: "rlimit duplicate resource",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{
+					{Resource: "nofile", Soft: new(int64(1))},
+					{Resource: "nofile", Soft: new(int64(2))},
+				}
+			},
+			wantFields: []string{"spec.template.spec.rlimits[1].resource"},
+		},
+		{
+			name: "rlimit no values",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{{Resource: "nofile"}}
+			},
+			wantFields: []string{"spec.template.spec.rlimits[0]"},
+		},
+		{
+			name: "rlimit soft above hard",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{
+					{Resource: "nofile", Soft: new(int64(100)), Hard: new(int64(50))},
+				}
+			},
+			wantFields: []string{"spec.template.spec.rlimits[0].soft"},
+		},
+		{
+			name: "rlimit unlimited soft over finite hard",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{
+					{Resource: "nofile", Soft: new(RlimitInfinity), Hard: new(int64(50))},
+				}
+			},
+			wantFields: []string{"spec.template.spec.rlimits[0].soft"},
+		},
+		{
+			name: "rlimit below -1",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Rlimits = []Rlimit{{Resource: "nofile", Soft: new(int64(-2))}}
+			},
+			wantFields: []string{"spec.template.spec.rlimits[0].soft"},
+		},
+		{
+			name:       "nice out of range",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Nice = new(int32(20)) },
+			wantFields: []string{"spec.template.spec.nice"},
+		},
+		{
+			name:       "nice ok",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Nice = new(int32(-20)) },
+			wantFields: nil,
+		},
+		{
+			name:       "oomScoreAdjust out of range",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.OOMScoreAdjust = new(int32(1001)) },
+			wantFields: []string{"spec.template.spec.oomScoreAdjust"},
+		},
+		{
+			name:       "umask not octal",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Umask = new("088") },
+			wantFields: []string{"spec.template.spec.umask"},
+		},
+		{
+			name:       "umask too short",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Umask = new("07") },
+			wantFields: []string{"spec.template.spec.umask"},
+		},
+		{
+			name:       "umask ok",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Umask = new("0022") },
+			wantFields: nil,
+		},
+		{
+			name:       "negative minReadySeconds",
+			mutate:     func(d *Daemon) { d.Spec.MinReadySeconds = -1 },
+			wantFields: []string{"spec.minReadySeconds"},
+		},
+		{
+			name: "progressDeadline not above minReady",
+			mutate: func(d *Daemon) {
+				d.Spec.MinReadySeconds = 30
+				d.Spec.ProgressDeadlineSeconds = new(int32(30))
+			},
+			wantFields: []string{"spec.progressDeadlineSeconds"},
+		},
+		{
+			name: "minReady with deadline ok",
+			mutate: func(d *Daemon) {
+				d.Spec.MinReadySeconds = 5
+				d.Spec.ProgressDeadlineSeconds = new(int32(600))
+			},
+			wantFields: nil,
+		},
 	}
 
 	for _, tc := range cases {

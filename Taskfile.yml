@@ -177,6 +177,13 @@ tasks:
       - bash scripts/m5-acceptance.sh
     platforms: [linux]
 
+  accept:m6:
+    desc: Rootless M6 acceptance (shim hardening, cpu.max, startupProbe, rollout safety, restart/run verbs)
+    deps: [build]
+    cmds:
+      - bash scripts/m6-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

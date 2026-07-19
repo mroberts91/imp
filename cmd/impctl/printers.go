@@ -25,17 +25,18 @@ func newTabWriter(w io.Writer) *tabwriter.Writer {
 
 func printDaemonTable(w io.Writer, daemons []v1alpha1.Daemon) {
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "NAME\tREADY\tUP-TO-DATE\tAGE")
+	fmt.Fprintln(tw, "NAME\tREADY\tUP-TO-DATE\tAVAILABLE\tAGE")
 	for i := range daemons {
 		d := &daemons[i]
 		desired := int32(0)
 		if d.Spec.Replicas != nil {
 			desired = *d.Spec.Replicas
 		}
-		fmt.Fprintf(tw, "%s\t%d/%d\t%d\t%s\n",
+		fmt.Fprintf(tw, "%s\t%d/%d\t%d\t%d\t%s\n",
 			d.Metadata.Name,
 			d.Status.ReadyReplicas, desired,
 			d.Status.UpdatedReplicas,
+			d.Status.AvailableReplicas,
 			age(d.Metadata.CreationTimestamp))
 	}
 	tw.Flush()

@@ -29,6 +29,7 @@ import (
 	"github.com/mroberts91/imp/internal/controllers/timer"
 	"github.com/mroberts91/imp/internal/etcl"
 	"github.com/mroberts91/imp/internal/execd/cgroups"
+	"github.com/mroberts91/imp/internal/execd/childsetup"
 	"github.com/mroberts91/imp/internal/execd/logs"
 	"github.com/mroberts91/imp/internal/execd/supervisor"
 	"github.com/mroberts91/imp/internal/manifest"
@@ -46,6 +47,11 @@ var (
 )
 
 func main() {
+	// When this process is a freshly spawned Proc child (M6-a always-shim),
+	// take over before flags, logging, or anything else — MaybeRun never
+	// returns in that case.
+	childsetup.MaybeRun()
+
 	var (
 		socketPath          = flag.String("socket", "/run/imp/impd.sock", "path of the API's unix domain socket")
 		dataDir             = flag.String("data-dir", "/var/lib/imp", "state directory (object store, process logs)")

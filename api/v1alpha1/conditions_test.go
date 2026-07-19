@@ -144,3 +144,65 @@ func TestSetStatusConditionLeavesOtherTypesAlone(t *testing.T) {
 		t.Error("Progressing condition lost when setting Available")
 	}
 }
+
+// lutCondAt builds a condition stamping both timestamps, the way an M6-aware
+// caller (the daemon controller) does.
+func lutCondAt(status ConditionStatus, reason, message string, at time.Time) Condition {
+	c := condAt(status, reason, at)
+	c.Message = message
+	c.LastUpdateTime = NewTime(at)
+	return c
+}
+
+func TestSetStatusConditionLastUpdateTimeBumpsOnChange(t *testing.T) {
+	var conditions []Condition
+	t0 := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+	t1 := t0.Add(time.Minute)
+
+	SetStatusCondition(&conditions, lutCondAt(ConditionTrue, "Rolling", "1/3 updated", t0))
+	// In-place change (message only): LTT preserved, LUT moves.
+	if !SetStatusCondition(&conditions, lutCondAt(ConditionTrue, "Rolling", "2/3 updated", t1)) {
+		t.Fatal("message change must be recorded")
+	}
+	got := FindStatusCondition(conditions, ConditionTypeAvailable)
+	if !got.LastTransitionTime.Equal(NewTime(t0)) {
+		t.Errorf("lastTransitionTime = %v, want %v (no status flip)", got.LastTransitionTime, t0)
+	}
+	if !got.LastUpdateTime.Equal(NewTime(t1)) {
+		t.Errorf("lastUpdateTime = %v, want %v (change recorded)", got.LastUpdateTime, t1)
+	}
+}
+
+func TestSetStatusConditionLastUpdateTimeFrozenOnNoOp(t *testing.T) {
+	var conditions []Condition
+	t0 := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	SetStatusCondition(&conditions, lutCondAt(ConditionTrue, "Rolling", "1/3 updated", t0))
+	// Identical condition later: LUT must NOT move — a stalled rollout
+	// freezes it, which is exactly what the progress deadline measures.
+	if SetStatusCondition(&conditions, lutCondAt(ConditionTrue, "Rolling", "1/3 updated", t0.Add(time.Hour))) {
+		t.Fatal("identical condition must be a full no-op")
+	}
+	got := FindStatusCondition(conditions, ConditionTypeAvailable)
+	if !got.LastUpdateTime.Equal(NewTime(t0)) {
+		t.Errorf("lastUpdateTime moved to %v on a no-op set", got.LastUpdateTime)
+	}
+}
+
+func TestSetStatusConditionLastUpdateTimePreservedForLegacyCallers(t *testing.T) {
+	var conditions []Condition
+	t0 := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
+
+	SetStatusCondition(&conditions, lutCondAt(ConditionTrue, "Rolling", "1/3 updated", t0))
+	// A caller that doesn't stamp LastUpdateTime (pre-M6 shape) records a
+	// change: the stored LUT must be carried forward, not erased.
+	legacy := condAt(ConditionTrue, "Rolling", t0.Add(time.Minute))
+	legacy.Message = "2/3 updated"
+	if !SetStatusCondition(&conditions, legacy) {
+		t.Fatal("message change must be recorded")
+	}
+	got := FindStatusCondition(conditions, ConditionTypeAvailable)
+	if !got.LastUpdateTime.Equal(NewTime(t0)) {
+		t.Errorf("lastUpdateTime = %v, want preserved %v", got.LastUpdateTime, t0)
+	}
+}

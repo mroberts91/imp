@@ -5,9 +5,14 @@ for managing daemons — a middle ground between systemd and Nomad. One daemon
 binary (`impd`) hosts the API, object store, controllers, and process
 supervisor; a CLI (`impctl`) talks to it over a Unix domain socket.
 
-**M1–M3 complete:** drop a Daemon → Procs start → conditions/Events explain
-failures → cgroup limits, probes, `/metrics`, and D1 re-attach. Gates:
-`task accept:m1`, `task accept:m2`, `task accept:m3`.
+**M1–M6 complete:** drop a Daemon → Procs start → conditions/Events explain
+failures → cgroup limits (memory/cpu/pids), probes (startup/liveness/
+readiness), `/metrics`, restart re-attach → replicas + RollingUpdate →
+Timer (cron replacement), log retention, `impctl top` → unit-file-grade
+hardening (rlimits, nice, oomScoreAdjust, umask), rollout safety
+(minReadySeconds, progressDeadlineSeconds), and operator verbs
+(`impctl restart` / `run` / `rollout status`). Gates: `task accept:m1` …
+`task accept:m6`.
 
 ## Quick start (rootless)
 
@@ -44,7 +49,7 @@ bin/impctl get procs
 bin/impctl logs hello
 ```
 
-Regression gates: `task accept:m1`, `task accept:m2`, `task accept:m3`. Metrics
+Regression gates: `task accept:m1` through `task accept:m6`. Metrics
 (when enabled): `curl -s http://127.0.0.1:9090/metrics`.
 
 Go version is pinned in `.go-version`. See `task --list` for build/check/cross

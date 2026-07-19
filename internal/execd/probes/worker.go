@@ -51,9 +51,10 @@ func (w *worker) stop() {
 
 func (w *worker) loop(ctx context.Context) {
 	// Initial published result before first successful threshold crossing:
-	// readiness=Failure, liveness=Success (match kubelet).
+	// readiness=Failure, liveness=Success, startup=Failure ("has not
+	// started yet") — match kubelet.
 	initial := ResultSuccess
-	if w.probeType == ProbeReadiness {
+	if w.probeType == ProbeReadiness || w.probeType == ProbeStartup {
 		initial = ResultFailure
 	}
 	w.emit(ResultEvent{
@@ -132,6 +133,13 @@ func (w *worker) doProbe(parent context.Context, timeout time.Duration) {
 
 	if w.probeType == ProbeLiveness && result == ResultFailure {
 		// Stop probing until supervisor restarts the Proc (new Start()).
+		w.onHold = true
+		w.resultRun = 0
+	}
+	if w.probeType == ProbeStartup {
+		// Either outcome ends startup probing: success hands over to the
+		// released liveness/readiness workers; failure means a restart is
+		// coming (kubelet stops the startup worker in both cases).
 		w.onHold = true
 		w.resultRun = 0
 	}

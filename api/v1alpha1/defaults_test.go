@@ -30,6 +30,35 @@ func TestDefaultDaemon(t *testing.T) {
 	if tpl.TerminationGracePeriodSeconds == nil || *tpl.TerminationGracePeriodSeconds != DefaultTerminationGracePeriodSeconds {
 		t.Errorf("TerminationGracePeriodSeconds = %v, want %d", tpl.TerminationGracePeriodSeconds, DefaultTerminationGracePeriodSeconds)
 	}
+	if d.Spec.ProgressDeadlineSeconds == nil || *d.Spec.ProgressDeadlineSeconds != DefaultProgressDeadlineSeconds {
+		t.Errorf("ProgressDeadlineSeconds = %v, want %d", d.Spec.ProgressDeadlineSeconds, DefaultProgressDeadlineSeconds)
+	}
+	if d.Spec.MinReadySeconds != 0 {
+		t.Errorf("MinReadySeconds = %d, want 0 (no default)", d.Spec.MinReadySeconds)
+	}
+	// M6 template fields must stay nil (hash stability — pre-M6 Daemons
+	// must not roll on upgrade).
+	if tpl.StartupProbe != nil || tpl.Rlimits != nil || tpl.Nice != nil ||
+		tpl.OOMScoreAdjust != nil || tpl.Umask != nil {
+		t.Error("defaulting materialized an M6 template field")
+	}
+}
+
+func TestDefaultDaemonStartupProbe(t *testing.T) {
+	d := &Daemon{
+		Metadata: ObjectMeta{Name: "web"},
+		Spec: DaemonSpec{
+			Template: ProcTemplate{Spec: ProcTemplateSpec{
+				Command:      []string{"/bin/true"},
+				StartupProbe: &Probe{Exec: &ExecAction{Command: []string{"/bin/started"}}},
+			}},
+		},
+	}
+	DefaultDaemon(d)
+	sp := d.Spec.Template.Spec.StartupProbe
+	if sp.PeriodSeconds != DefaultProbePeriodSeconds || sp.FailureThreshold != DefaultProbeFailureThreshold {
+		t.Errorf("startupProbe inner defaults not applied: period=%d failureThreshold=%d", sp.PeriodSeconds, sp.FailureThreshold)
+	}
 }
 
 func TestDefaultDaemonRollingUpdate(t *testing.T) {

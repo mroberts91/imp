@@ -2,10 +2,35 @@
 
 ## Resource limits
 
-Daemon / Proc templates may set `resources.limits` (`memory`, `cpuWeight`,
-`pids`). Enforcement requires a **real** cgroup v2 `--cgroup-root` (systemd
+Daemon / Proc templates may set `resources.limits` (`memory`, `cpu`,
+`cpuWeight`, `pids`). `cpu` is a hard quota — millicores (`"500m"`) or whole
+cores (`"2"`) mapped to cgroup `cpu.max`; `cpuWeight` is the proportional
+share. Enforcement requires a **real** cgroup v2 `--cgroup-root` (systemd
 `Delegate=yes`, or an OpenRC prepared subtree). A fake ad-hoc root only
 exercises the code path — see [install.md](install.md).
+
+## Process hardening (unit-file translation)
+
+The template speaks systemd's process-control dialect
+([examples/10](../examples/10-hardened-daemon.yaml)):
+
+| unit-file directive | template field |
+|---|---|
+| `LimitNOFILE=65536` | `rlimits: [{resource: nofile, soft: 65536}]` (one value sets soft+hard; `-1` = unlimited) |
+| `Nice=5` | `nice: 5` |
+| `OOMScoreAdjust=-100` | `oomScoreAdjust: -100` |
+| `UMask=0027` | `umask: "0027"` |
+| `CPUQuota=50%` | `resources.limits.cpu: "500m"` |
+| `User=`/`Group=` | `user:` / `group:` |
+
+Setup runs inside the child before exec, in systemd's order: rlimits while
+still privileged (hard limits can be *raised* under a root impd), then
+oom_score_adj and nice, then the identity drop, then umask. A setup failure
+exits 126 with an `imp child-setup: …` line in the Proc's own log.
+
+Note (M6 behavior change): when `user:` is set, the process now gets that
+user's **supplementary groups** (initgroups semantics, as systemd does).
+Before M6 the supplementary list was empty.
 
 ## Probes
 
@@ -13,6 +38,34 @@ exercises the code path — see [install.md](install.md).
 `Ready` and trigger restarts. Exec probes run **inside** the Proc cgroup;
 http/tcp dial from execd. Failures surface as Ready reasons (`ProbePending`,
 `ProbeFailed`) and Events (`ProbeFailed`, `Unhealthy`).
+
+`startupProbe` protects slow starters: until it succeeds, liveness and
+readiness are held and the Proc stays Ready=False/`ProbePending`; past its
+failure threshold the process is restarted like a liveness failure
+([examples/11](../examples/11-startup-probe.yaml)).
+
+## Rollout safety and operator verbs
+
+`spec.minReadySeconds` makes a Proc count as *available* only after being
+Ready that long; `status.availableReplicas` and the Available condition are
+computed from it, and a RollingUpdate waits for availability before moving
+to the next ordinal. `spec.progressDeadlineSeconds` (default 600) flips
+Progressing to False/`ProgressDeadlineExceeded` (plus a Warning event) when
+a rollout makes no progress for that long — a report, not a brake: the
+controller keeps reconciling, and a fixed spec (new generation) resets the
+deadline.
+
+- `impctl rollout status DAEMON` watches until the rollout completes
+  (exit 0) or exceeds its deadline (exit 1). There is no `rollout undo` /
+  `history`: the manifest directory owns the spec, so the manifest file is
+  the revision history.
+- `impctl restart DAEMON` deletes the daemon's Procs and lets the
+  controller recreate them — `systemctl restart` semantics (all replicas at
+  once, brief downtime). The spec is untouched, so nothing fights the
+  manifest directory.
+- `impctl run TIMER` fires a timer's run immediately (`{timer}-manual-<ts>`,
+  annotated `impd.sh/manual`). Manual runs count as active for
+  `concurrencyPolicy` but never advance `lastScheduleTime`.
 
 ## Metrics
 

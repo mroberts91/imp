@@ -413,10 +413,12 @@ func (w *worker) startProbes(p *v1alpha1.Proc) {
 	w.rt.ReadinessOK = false
 	w.rt.ReadinessFailed = false
 	w.rt.LivenessFailed = false
-	if p.Spec.LivenessProbe == nil && p.Spec.ReadinessProbe == nil {
+	w.rt.HasStartupProbe = p.Spec.StartupProbe != nil
+	w.rt.StartupDone = false
+	if p.Spec.StartupProbe == nil && p.Spec.LivenessProbe == nil && p.Spec.ReadinessProbe == nil {
 		return
 	}
-	w.m.probes.Start(w.key, w.rt.CgroupPath, w.rt.StartedAt, p.Spec.LivenessProbe, p.Spec.ReadinessProbe)
+	w.m.probes.Start(w.key, w.rt.CgroupPath, w.rt.StartedAt, p.Spec.StartupProbe, p.Spec.LivenessProbe, p.Spec.ReadinessProbe)
 }
 
 func (w *worker) publishCgroupSnap(p *v1alpha1.Proc) {
@@ -453,6 +455,22 @@ func (w *worker) applyProbe(ev probes.ResultEvent) {
 	}
 
 	switch ev.ProbeType {
+	case probes.ProbeStartup:
+		if ev.Result == probes.ResultSuccess {
+			// Startup complete: release the held liveness/readiness workers.
+			w.rt.StartupDone = true
+			w.m.probes.Release(w.key)
+		} else if ev.Message != "initial probe state" {
+			// Effective failure (threshold crossed): the process never came
+			// up — restart it through the liveness latch.
+			w.rt.LivenessFailed = true
+			if p != nil {
+				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonProbeFailed,
+					fmt.Sprintf("Startup probe failed: %s", ev.Message))
+				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonUnhealthy,
+					"Startup probe failed; killing and restarting")
+			}
+		}
 	case probes.ProbeReadiness:
 		if ev.Result == probes.ResultSuccess {
 			w.rt.ReadinessOK = true

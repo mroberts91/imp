@@ -10,6 +10,7 @@ package v1alpha1
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/robfig/cron/v3"
@@ -51,6 +52,34 @@ func IsKnownSignal(name string) bool {
 	return knownSignals[strings.TrimPrefix(name, "SIG")]
 }
 
+// knownRlimits are the lowercase RLIMIT_* resource names accepted in
+// spec.rlimits. Hand-rolled table (no x/sys import) for the same reason as
+// knownSignals; the shim owns the name → RLIMIT_* constant mapping.
+var knownRlimits = map[string]bool{
+	"as": true, "core": true, "cpu": true, "data": true, "fsize": true,
+	"locks": true, "memlock": true, "msgqueue": true, "nice": true,
+	"nofile": true, "nproc": true, "rss": true, "rtprio": true,
+	"sigpending": true, "stack": true,
+}
+
+// IsKnownRlimit reports whether name is a recognized rlimit resource name.
+func IsKnownRlimit(name string) bool {
+	return knownRlimits[name]
+}
+
+// KnownRlimitNames returns the accepted rlimit resource names, sorted. The
+// childsetup shim pins its RLIMIT_* mapping against this list in tests.
+func KnownRlimitNames() []string {
+	names := make([]string, 0, len(knownRlimits))
+	for name := range knownRlimits {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+var umaskRegexp = regexp.MustCompile(`^[0-7]{3,4}$`)
+
 func ValidateDaemon(d *Daemon) ErrorList {
 	var errs ErrorList
 	errs = append(errs, validateObjectMeta(&d.Metadata, NewPath("metadata"))...)
@@ -87,6 +116,15 @@ func ValidateDaemon(d *Daemon) ErrorList {
 			d.Spec.UpdateStrategy.Type,
 			[]string{string(UpdateStrategyRecreate), string(UpdateStrategyRollingUpdate)},
 		))
+	}
+
+	if d.Spec.MinReadySeconds < 0 {
+		errs = append(errs, invalidErr(specPath.Child("minReadySeconds"), d.Spec.MinReadySeconds, "must be greater than or equal to 0"))
+	}
+	if v := d.Spec.ProgressDeadlineSeconds; v != nil && *v <= d.Spec.MinReadySeconds {
+		// The Deployment rule: a deadline shorter than the availability
+		// delay could never be met.
+		errs = append(errs, invalidErr(specPath.Child("progressDeadlineSeconds"), *v, "must be greater than minReadySeconds"))
 	}
 
 	tplMetaPath := specPath.Child("template").Child("metadata")
@@ -219,8 +257,61 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 	if s.ReadinessProbe != nil {
 		errs = append(errs, validateProbe(s.ReadinessProbe, p.Child("readinessProbe"), false)...)
 	}
+	if s.StartupProbe != nil {
+		// Like liveness, a startup probe's failure restarts the process, so
+		// successThreshold must be 1 (kubelet rule).
+		errs = append(errs, validateProbe(s.StartupProbe, p.Child("startupProbe"), true)...)
+	}
+	errs = append(errs, validateRlimits(s.Rlimits, p.Child("rlimits"))...)
+	if s.Nice != nil && (*s.Nice < -20 || *s.Nice > 19) {
+		errs = append(errs, invalidErr(p.Child("nice"), *s.Nice, "must be between -20 and 19"))
+	}
+	if s.OOMScoreAdjust != nil && (*s.OOMScoreAdjust < -1000 || *s.OOMScoreAdjust > 1000) {
+		errs = append(errs, invalidErr(p.Child("oomScoreAdjust"), *s.OOMScoreAdjust, "must be between -1000 and 1000"))
+	}
+	if s.Umask != nil && !umaskRegexp.MatchString(*s.Umask) {
+		errs = append(errs, invalidErr(p.Child("umask"), *s.Umask, `must be 3-4 octal digits, e.g. "0022"`))
+	}
 	if s.LogRetention != nil {
 		errs = append(errs, validateLogRetention(s.LogRetention, p.Child("logRetention"))...)
+	}
+	return errs
+}
+
+func validateRlimits(rlimits []Rlimit, p *Path) ErrorList {
+	var errs ErrorList
+	seen := map[string]bool{}
+	for i, r := range rlimits {
+		rp := p.Index(i)
+		switch {
+		case r.Resource == "":
+			errs = append(errs, requiredErr(rp.Child("resource"), ""))
+		case !IsKnownRlimit(r.Resource):
+			errs = append(errs, invalidErr(rp.Child("resource"), r.Resource, "must be a lowercase rlimit resource name, e.g. nofile, core, nproc"))
+		case seen[r.Resource]:
+			errs = append(errs, invalidErr(rp.Child("resource"), r.Resource, "duplicate resource"))
+		default:
+			seen[r.Resource] = true
+		}
+		if r.Soft == nil && r.Hard == nil {
+			errs = append(errs, requiredErr(rp, "at least one of soft or hard is required"))
+			continue
+		}
+		if r.Soft != nil && *r.Soft < RlimitInfinity {
+			errs = append(errs, invalidErr(rp.Child("soft"), *r.Soft, "must be greater than or equal to -1 (-1 means unlimited)"))
+		}
+		if r.Hard != nil && *r.Hard < RlimitInfinity {
+			errs = append(errs, invalidErr(rp.Child("hard"), *r.Hard, "must be greater than or equal to -1 (-1 means unlimited)"))
+		}
+		if r.Soft != nil && r.Hard != nil {
+			soft, hard := *r.Soft, *r.Hard
+			// -1 is infinity: an unlimited soft over a finite hard is invalid.
+			if soft == RlimitInfinity && hard != RlimitInfinity {
+				errs = append(errs, invalidErr(rp.Child("soft"), soft, "soft may not be unlimited when hard is finite"))
+			} else if soft != RlimitInfinity && hard != RlimitInfinity && soft > hard {
+				errs = append(errs, invalidErr(rp.Child("soft"), soft, "must be less than or equal to hard"))
+			}
+		}
 	}
 	return errs
 }
@@ -248,6 +339,11 @@ func validateResourceRequirements(r ResourceRequirements, p *Path) ErrorList {
 	if r.Limits.Memory != "" {
 		if _, err := ParseMemoryBytes(r.Limits.Memory); err != nil {
 			errs = append(errs, invalidErr(limPath.Child("memory"), r.Limits.Memory, err.Error()))
+		}
+	}
+	if r.Limits.CPU != "" {
+		if _, err := ParseCPUMax(r.Limits.CPU); err != nil {
+			errs = append(errs, invalidErr(limPath.Child("cpu"), r.Limits.CPU, err.Error()))
 		}
 	}
 	if r.Limits.CPUWeight != nil {

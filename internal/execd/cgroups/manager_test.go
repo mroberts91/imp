@@ -50,6 +50,7 @@ func TestEnsureApplyLimitsStatsListRemove(t *testing.T) {
 
 	limits := v1alpha1.ResourceLimits{
 		Memory:    "256Mi",
+		CPU:       "500m",
 		CPUWeight: new(int64(200)),
 		Pids:      new(int64(64)),
 	}
@@ -57,6 +58,7 @@ func TestEnsureApplyLimitsStatsListRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertFile(t, filepath.Join(path, fileMemoryMax), "268435456\n")
+	assertFile(t, filepath.Join(path, fileCPUMax), "50000 100000\n")
 	assertFile(t, filepath.Join(path, fileCPUWeight), "200\n")
 	assertFile(t, filepath.Join(path, filePidsMax), "64\n")
 

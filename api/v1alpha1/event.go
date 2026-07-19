@@ -35,6 +35,9 @@ const (
 	ReasonScheduledRun     = "ScheduledRun"
 	ReasonSkippedRun       = "SkippedRun"
 	ReasonMissedRun        = "MissedRun"
+	// ReasonProgressDeadlineExceeded (M6): a Daemon rollout made no progress
+	// for spec.progressDeadlineSeconds.
+	ReasonProgressDeadlineExceeded = "ProgressDeadlineExceeded"
 )
 
 // Event is an append-only, TTL-bounded record of something notable happening

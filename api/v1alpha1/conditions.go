@@ -15,8 +15,11 @@ package v1alpha1
 // on a Status flip; Reason/Message/ObservedGeneration changes are recorded
 // in place under the preserved transition time — the apimachinery behavior
 // (a generation bump must advance the condition's observedGeneration even
-// when the condition itself hasn't flipped). Imp never retires a condition
-// type.
+// when the condition itself hasn't flipped). LastUpdateTime (M6) moves on
+// every recorded change, flip or in-place — the DeploymentCondition
+// behavior; the no-op path leaves it untouched, so a stalled state freezes
+// it (which is what the progress deadline measures). Imp never retires a
+// condition type.
 
 // FindStatusCondition returns a pointer to the condition of the given type,
 // or nil if none exists.
@@ -48,6 +51,11 @@ func SetStatusCondition(conditions *[]Condition, cond Condition) bool {
 	if current.Status == cond.Status && current.Reason == cond.Reason &&
 		current.Message == cond.Message && current.ObservedGeneration == cond.ObservedGeneration {
 		return false
+	}
+	// A caller that doesn't stamp LastUpdateTime must not erase the stored
+	// one on an in-place change.
+	if cond.LastUpdateTime.IsZero() {
+		cond.LastUpdateTime = current.LastUpdateTime
 	}
 	*conditions = append(filterOutCondition(*conditions, cond.Type), cond)
 	return true

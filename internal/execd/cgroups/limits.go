@@ -26,6 +26,16 @@ func (m *Manager) ApplyLimits(path string, limits v1alpha1.ResourceLimits) error
 			return err
 		}
 	}
+	if limits.CPU != "" {
+		quota, err := v1alpha1.ParseCPUMax(limits.CPU)
+		if err != nil {
+			return fmt.Errorf("cpu: %w", err)
+		}
+		line := fmt.Sprintf("%d %d\n", quota, v1alpha1.CPUMaxPeriodUsec)
+		if err := writeFile(filepath.Join(path, fileCPUMax), line); err != nil {
+			return err
+		}
+	}
 	if limits.CPUWeight != nil {
 		w := *limits.CPUWeight
 		if w < 1 || w > 10000 {

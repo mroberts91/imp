@@ -16,7 +16,17 @@ type Daemon struct {
 type DaemonSpec struct {
 	Replicas       *int32         `json:"replicas,omitempty"`
 	UpdateStrategy UpdateStrategy `json:"updateStrategy,omitzero"`
-	Template       ProcTemplate   `json:"template"`
+	// MinReadySeconds is how long a Proc must be Ready before it counts as
+	// available (and before a rolling update proceeds past it). 0 = available
+	// as soon as Ready.
+	MinReadySeconds int32 `json:"minReadySeconds,omitempty"`
+	// ProgressDeadlineSeconds flips Progressing to False with reason
+	// ProgressDeadlineExceeded when a rollout makes no progress for this
+	// long. Defaulted to 600 (materialized — outside the template, so no
+	// hash impact). The deadline is a report, not a brake: reconciliation
+	// continues.
+	ProgressDeadlineSeconds *int32       `json:"progressDeadlineSeconds,omitempty"`
+	Template                ProcTemplate `json:"template"`
 }
 
 // UpdateStrategyType names a Daemon update strategy.
@@ -60,9 +70,11 @@ type TemplateMeta struct {
 // DaemonStatus is the observed state of a Daemon,
 // rolled up from its owned Procs.
 type DaemonStatus struct {
-	ObservedGeneration int64       `json:"observedGeneration,omitempty"`
-	Replicas           int32       `json:"replicas,omitempty"`
-	ReadyReplicas      int32       `json:"readyReplicas,omitempty"`
-	UpdatedReplicas    int32       `json:"updatedReplicas,omitempty"`
-	Conditions         []Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	Replicas           int32 `json:"replicas,omitempty"`
+	ReadyReplicas      int32 `json:"readyReplicas,omitempty"`
+	// AvailableReplicas counts Procs Ready for at least minReadySeconds.
+	AvailableReplicas int32       `json:"availableReplicas,omitempty"`
+	UpdatedReplicas   int32       `json:"updatedReplicas,omitempty"`
+	Conditions        []Condition `json:"conditions,omitempty"`
 }

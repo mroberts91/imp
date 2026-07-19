@@ -194,7 +194,7 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 		// ConcurrencyAllow falls through and fires alongside.
 	}
 
-	p := newRunProc(&t, due)
+	p := BuildRun(&t, due, false)
 	if _, err := c.client.ApplyProc(ctx, p); err != nil {
 		return fmt.Errorf("creating run %s: %w", p.Metadata.Name, err)
 	}
@@ -287,23 +287,38 @@ func (c *Controller) pruneHistory(ctx context.Context, t *v1alpha1.Timer, finish
 	return errors.Join(errs...)
 }
 
-// newRunProc builds the Proc for one tick: template metadata first, system
-// labels layered on top, the tick recorded in an annotation, an
+// BuildRun builds the Proc for one run of t: template metadata first,
+// system labels layered on top, the run time recorded in an annotation, an
 // ownerReference back to the Timer, and a deep copy of the (already
-// defaulted) template spec. The name is derived from the tick so a
-// retried pass re-applies the same object idempotently.
-func newRunProc(t *v1alpha1.Timer, due time.Time) *v1alpha1.Proc {
+// defaulted) template spec. The name is derived from the time so a retried
+// pass re-applies the same object idempotently.
+//
+// manual marks an operator-initiated run (`impctl run`, M6-d): the name
+// gains a "-manual-" infix and the impd.sh/manual annotation is set. This
+// controller treats manual runs as real runs — they count as active for
+// concurrencyPolicy and are history-pruned — but lastScheduleTime is
+// derived purely from the schedule, so they never advance it.
+//
+// Exported because impctl builds manual runs client-side with this exact
+// function: run identity has one author.
+func BuildRun(t *v1alpha1.Timer, at time.Time, manual bool) *v1alpha1.Proc {
 	labels := map[string]string{}
 	maps.Copy(labels, t.Spec.Template.Metadata.Labels)
 	labels[v1alpha1.LabelTimerName] = t.Metadata.Name
 
 	annotations := map[string]string{}
 	maps.Copy(annotations, t.Spec.Template.Metadata.Annotations)
-	annotations[v1alpha1.AnnotationScheduledAt] = due.Format(time.RFC3339)
+	annotations[v1alpha1.AnnotationScheduledAt] = at.Format(time.RFC3339)
+
+	name := fmt.Sprintf("%s-%d", t.Metadata.Name, at.Unix())
+	if manual {
+		name = fmt.Sprintf("%s-manual-%d", t.Metadata.Name, at.Unix())
+		annotations[v1alpha1.AnnotationManual] = "true"
+	}
 
 	return &v1alpha1.Proc{
 		Metadata: v1alpha1.ObjectMeta{
-			Name:        fmt.Sprintf("%s-%d", t.Metadata.Name, due.Unix()),
+			Name:        name,
 			Labels:      labels,
 			Annotations: annotations,
 			OwnerReferences: []v1alpha1.OwnerReference{{

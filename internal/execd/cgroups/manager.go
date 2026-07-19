@@ -25,6 +25,7 @@ const (
 	fileMemoryMax      = "memory.max"
 	fileMemoryCurrent  = "memory.current"
 	fileCPUWeight      = "cpu.weight"
+	fileCPUMax         = "cpu.max"
 	filePidsMax        = "pids.max"
 	filePidsCurrent    = "pids.current"
 	fileCPUStat        = "cpu.stat"
@@ -307,6 +308,7 @@ func synthesizeLeaf(path string) error {
 		fileMemoryMax:     "max",
 		fileMemoryCurrent: "0",
 		fileCPUWeight:     "100",
+		fileCPUMax:        "max 100000",
 		filePidsMax:       "max",
 		filePidsCurrent:   "0",
 		fileCPUStat:       "usage_usec 0\nuser_usec 0\nsystem_usec 0\n",

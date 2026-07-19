@@ -23,6 +23,10 @@ const (
 	DefaultHTTPGetHost   = "127.0.0.1"
 	DefaultTCPSocketHost = "127.0.0.1"
 
+	// DefaultProgressDeadlineSeconds matches the Deployment default.
+	// Materialized (DaemonSpec is outside the hashed template).
+	DefaultProgressDeadlineSeconds = int32(600)
+
 	// Log retention built-ins (doc 08 M5-d). Resolved by execd when a
 	// Proc's logRetention (or one of its fields) is nil — deliberately NOT
 	// materialized by defaulting, so pre-M5 template hashes stay stable.
@@ -48,6 +52,9 @@ func DefaultDaemon(d *Daemon) {
 		if d.Spec.UpdateStrategy.RollingUpdate.Partition == nil {
 			d.Spec.UpdateStrategy.RollingUpdate.Partition = new(int32(0))
 		}
+	}
+	if d.Spec.ProgressDeadlineSeconds == nil {
+		d.Spec.ProgressDeadlineSeconds = new(DefaultProgressDeadlineSeconds)
 	}
 	defaultProcTemplateSpec(&d.Spec.Template.Spec)
 }
@@ -92,6 +99,11 @@ func defaultProcTemplateSpec(s *ProcTemplateSpec) {
 	}
 	if s.ReadinessProbe != nil {
 		DefaultProbe(s.ReadinessProbe)
+	}
+	// StartupProbe inner defaults materialize only when the probe is set —
+	// such a Daemon rolls anyway. Absent stays nil (hash stability).
+	if s.StartupProbe != nil {
+		DefaultProbe(s.StartupProbe)
 	}
 }
 

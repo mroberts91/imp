@@ -1,0 +1,36 @@
+# 11 — startupProbe: protect slow starters from the liveness probe (M6).
+#
+# While the startup probe has not succeeded, liveness and readiness are
+# held and the Proc is Ready=False/ProbePending. When it succeeds, the
+# other probes take over. If it never succeeds within
+# periodSeconds x failureThreshold, the process is restarted.
+#
+# This daemon takes ~5s to "warm up"; the liveness probe below would kill
+# it during warm-up if the startup probe were not holding it.
+#
+#   impctl apply -f examples/11-startup-probe.yaml
+#   impctl get procs -w
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: slowstart
+spec:
+  template:
+    metadata:
+      labels:
+        app: slowstart
+    spec:
+      command:
+        - sh
+        - -c
+        - 'sleep 5; touch /tmp/slowstart-up; exec sleep 300'
+      startupProbe:
+        exec:
+          command: ["test", "-f", "/tmp/slowstart-up"]
+        periodSeconds: 1
+        failureThreshold: 30
+      livenessProbe:
+        exec:
+          command: ["test", "-f", "/tmp/slowstart-up"]
+        periodSeconds: 2
+        failureThreshold: 2

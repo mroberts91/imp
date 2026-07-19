@@ -28,8 +28,10 @@ func fullDaemon() *Daemon {
 			Annotations:       map[string]string{AnnotationManagedBy: ManagedByManifest, AnnotationSourcePath: "web.yaml"},
 		},
 		Spec: DaemonSpec{
-			Replicas:       new(int32(2)),
-			UpdateStrategy: UpdateStrategy{Type: UpdateStrategyRecreate},
+			Replicas:                new(int32(2)),
+			UpdateStrategy:          UpdateStrategy{Type: UpdateStrategyRecreate},
+			MinReadySeconds:         5,
+			ProgressDeadlineSeconds: new(DefaultProgressDeadlineSeconds),
 			Template: ProcTemplate{
 				Metadata: TemplateMeta{
 					Labels:      map[string]string{"app": "web"},
@@ -47,10 +49,15 @@ func fullDaemon() *Daemon {
 					Resources: ResourceRequirements{
 						Limits: ResourceLimits{
 							Memory:    "256Mi",
+							CPU:       "500m",
 							CPUWeight: new(int64(200)),
 							Pids:      new(int64(128)),
 						},
 					},
+					Rlimits:        []Rlimit{{Resource: "nofile", Soft: new(int64(65536)), Hard: new(int64(65536))}},
+					Nice:           new(int32(5)),
+					OOMScoreAdjust: new(int32(-100)),
+					Umask:          new("0027"),
 					LivenessProbe: &Probe{
 						Exec:                &ExecAction{Command: []string{"/bin/true"}},
 						InitialDelaySeconds: 2,
@@ -72,6 +79,13 @@ func fullDaemon() *Daemon {
 						SuccessThreshold: 1,
 						FailureThreshold: 3,
 					},
+					StartupProbe: &Probe{
+						Exec:             &ExecAction{Command: []string{"/bin/started"}},
+						TimeoutSeconds:   1,
+						PeriodSeconds:    2,
+						SuccessThreshold: 1,
+						FailureThreshold: 30,
+					},
 				},
 			},
 		},
@@ -79,12 +93,14 @@ func fullDaemon() *Daemon {
 			ObservedGeneration: 3,
 			Replicas:           2,
 			ReadyReplicas:      1,
+			AvailableReplicas:  1,
 			UpdatedReplicas:    2,
 			Conditions: []Condition{{
 				Type:               ConditionTypeAvailable,
 				Status:             ConditionFalse,
 				ObservedGeneration: 3,
 				LastTransitionTime: NewTime(time.Date(2026, 7, 10, 12, 5, 0, 0, time.UTC)),
+				LastUpdateTime:     NewTime(time.Date(2026, 7, 10, 12, 6, 0, 0, time.UTC)),
 				Reason:             "MinimumReplicasUnavailable",
 				Message:            "1 of 2 replicas ready",
 			}},

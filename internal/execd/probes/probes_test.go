@@ -53,7 +53,7 @@ func TestReadinessInitialFailureThenSuccess(t *testing.T) {
 		SuccessThreshold:    1,
 		FailureThreshold:    3,
 	}
-	m.Start("Proc/web", "/cg", clk.Now(), nil, spec)
+	m.Start("Proc/web", "/cg", clk.Now(), nil, nil, spec)
 	defer m.Stop("Proc/web")
 
 	ev := waitEvent(t, events, time.Second)
@@ -85,7 +85,7 @@ func TestLivenessFailureThreshold(t *testing.T) {
 		SuccessThreshold: 1,
 		FailureThreshold: 2,
 	}
-	m.Start("Proc/web", "/cg", clk.Now(), spec, nil)
+	m.Start("Proc/web", "/cg", clk.Now(), nil, spec, nil)
 	defer m.Stop("Proc/web")
 
 	ev := waitEvent(t, events, time.Second)
@@ -164,4 +164,100 @@ func waitWaiters(t *testing.T, clk *clock.Fake, want int) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %d clock waiters (have %d)", want, clk.Waiters())
+}
+
+func TestStartupHoldsOthersUntilRelease(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1000, 0).UTC())
+	events := make(chan ResultEvent, 8)
+	runner := &stubRunner{code: 0}
+	m := NewManager(runner, clk, func(ev ResultEvent) { events <- ev })
+
+	probe := func(failureTh int32) *v1alpha1.Probe {
+		return &v1alpha1.Probe{
+			Exec:             &v1alpha1.ExecAction{Command: []string{"true"}},
+			PeriodSeconds:    1,
+			TimeoutSeconds:   1,
+			SuccessThreshold: 1,
+			FailureThreshold: failureTh,
+		}
+	}
+	m.Start("Proc/web", "/cg", clk.Now(), probe(30), probe(3), probe(3))
+	defer m.Stop("Proc/web")
+
+	// Only the startup worker announces itself: liveness/readiness are held.
+	ev := waitEvent(t, events, time.Second)
+	if ev.ProbeType != ProbeStartup || ev.Result != ResultFailure {
+		t.Fatalf("initial: got %+v, want Startup/Failure", ev)
+	}
+	select {
+	case ev := <-events:
+		t.Fatalf("held worker emitted %+v before release", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Startup succeeds.
+	waitWaiters(t, clk, 1)
+	clk.Step(time.Second)
+	ev = waitEvent(t, events, time.Second)
+	if ev.ProbeType != ProbeStartup || ev.Result != ResultSuccess {
+		t.Fatalf("startup success: got %+v", ev)
+	}
+
+	// The supervisor observes success and releases the held workers; their
+	// initial states arrive (liveness Success, readiness Failure).
+	m.Release("Proc/web")
+	seen := map[ProbeType]Result{}
+	for range 2 {
+		ev := waitEvent(t, events, time.Second)
+		if ev.Message != "initial probe state" {
+			t.Fatalf("unexpected non-initial event %+v", ev)
+		}
+		seen[ev.ProbeType] = ev.Result
+	}
+	if seen[ProbeLiveness] != ResultSuccess || seen[ProbeReadiness] != ResultFailure {
+		t.Fatalf("released initial states = %v", seen)
+	}
+}
+
+func TestStartupFailureThresholdEmitsOnceAndHolds(t *testing.T) {
+	clk := clock.NewFake(time.Unix(1000, 0).UTC())
+	events := make(chan ResultEvent, 8)
+	runner := &stubRunner{code: 1}
+	m := NewManager(runner, clk, func(ev ResultEvent) { events <- ev })
+
+	startup := &v1alpha1.Probe{
+		Exec:             &v1alpha1.ExecAction{Command: []string{"false"}},
+		PeriodSeconds:    1,
+		TimeoutSeconds:   1,
+		SuccessThreshold: 1,
+		FailureThreshold: 2,
+	}
+	m.Start("Proc/web", "/cg", clk.Now(), startup, nil, nil)
+	defer m.Stop("Proc/web")
+
+	ev := waitEvent(t, events, time.Second)
+	if ev.ProbeType != ProbeStartup || ev.Result != ResultFailure || ev.Message != "initial probe state" {
+		t.Fatalf("initial: got %+v", ev)
+	}
+
+	waitWaiters(t, clk, 1)
+	clk.Step(time.Second) // first failure — below threshold
+	select {
+	case ev := <-events:
+		t.Fatalf("unexpected event below threshold: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+	clk.Step(time.Second) // crosses threshold
+	ev = waitEvent(t, events, time.Second)
+	if ev.ProbeType != ProbeStartup || ev.Result != ResultFailure {
+		t.Fatalf("want effective Startup/Failure, got %+v", ev)
+	}
+
+	// On hold now: further ticks emit nothing (restart is coming).
+	clk.Step(time.Second)
+	select {
+	case ev := <-events:
+		t.Fatalf("startup worker not on hold: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
 }

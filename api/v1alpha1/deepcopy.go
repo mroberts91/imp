@@ -66,6 +66,9 @@ func (in *DaemonSpec) DeepCopy() *DaemonSpec {
 	if in.UpdateStrategy.RollingUpdate != nil {
 		out.UpdateStrategy.RollingUpdate = in.UpdateStrategy.RollingUpdate.DeepCopy()
 	}
+	if in.ProgressDeadlineSeconds != nil {
+		out.ProgressDeadlineSeconds = new(*in.ProgressDeadlineSeconds)
+	}
 	out.Template = *in.Template.DeepCopy()
 	return &out
 }
@@ -113,8 +116,41 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 	if in.ReadinessProbe != nil {
 		out.ReadinessProbe = in.ReadinessProbe.DeepCopy()
 	}
+	if in.StartupProbe != nil {
+		out.StartupProbe = in.StartupProbe.DeepCopy()
+	}
+	if in.Rlimits != nil {
+		out.Rlimits = make([]Rlimit, len(in.Rlimits))
+		for i := range in.Rlimits {
+			out.Rlimits[i] = *in.Rlimits[i].DeepCopy()
+		}
+	}
+	if in.Nice != nil {
+		out.Nice = new(*in.Nice)
+	}
+	if in.OOMScoreAdjust != nil {
+		out.OOMScoreAdjust = new(*in.OOMScoreAdjust)
+	}
+	if in.Umask != nil {
+		out.Umask = new(*in.Umask)
+	}
 	if in.LogRetention != nil {
 		out.LogRetention = in.LogRetention.DeepCopy()
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *Rlimit) DeepCopy() *Rlimit {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Soft != nil {
+		out.Soft = new(*in.Soft)
+	}
+	if in.Hard != nil {
+		out.Hard = new(*in.Hard)
 	}
 	return &out
 }

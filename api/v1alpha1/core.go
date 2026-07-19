@@ -33,7 +33,11 @@ const (
 	AnnotationManagedBy   = "impd.sh/managed-by"
 	AnnotationSourcePath  = "impd.sh/source-path"
 	AnnotationScheduledAt = "impd.sh/scheduled-at"
-	ManagedByManifest     = "manifest"
+	// AnnotationManual marks a Timer run created by `impctl run` rather than
+	// the schedule. Manual runs never advance status.lastScheduleTime but do
+	// count as active for concurrencyPolicy.
+	AnnotationManual  = "impd.sh/manual"
+	ManagedByManifest = "manifest"
 )
 
 const (
@@ -85,6 +89,12 @@ type Condition struct {
 	Status             ConditionStatus `json:"status"`
 	ObservedGeneration int64           `json:"observedGeneration,omitempty"`
 	LastTransitionTime Time            `json:"lastTransitionTime,omitzero"`
-	Reason             string          `json:"reason"`
-	Message            string          `json:"message"`
+	// LastUpdateTime moves whenever SetStatusCondition records any change
+	// (flip or in-place), unlike LastTransitionTime which moves only on a
+	// status flip. Mini-fork of apps/v1 DeploymentCondition.LastUpdateTime;
+	// the Daemon progress deadline anchors on it. Callers stamp it alongside
+	// LastTransitionTime; conditions written before M6 simply lack it.
+	LastUpdateTime Time   `json:"lastUpdateTime,omitzero"`
+	Reason         string `json:"reason"`
+	Message        string `json:"message"`
 }

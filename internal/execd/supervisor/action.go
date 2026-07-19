@@ -82,11 +82,17 @@ type RuntimeRecord struct {
 	// Probe-driven Ready / restart state (M3). HasReadinessProbe is set when
 	// the Proc template configures a readinessProbe; ReadinessOK is the
 	// effective readiness after thresholds. LivenessFailed latches until
-	// the Unhealthy stop path consumes it.
+	// the Unhealthy stop path consumes it — a failed startup probe (M6)
+	// reuses the same latch, so computeProcAction needs no startup arm.
 	HasReadinessProbe bool
 	ReadinessOK       bool
 	ReadinessFailed   bool // failure threshold crossed (not merely initial Failure)
 	LivenessFailed    bool
+
+	// Startup gate (M6): while HasStartupProbe && !StartupDone, liveness and
+	// readiness workers are held and Ready projects False/ProbePending.
+	HasStartupProbe bool
+	StartupDone     bool
 }
 
 // computeProcAction decides the next action from desired (exists + policy)

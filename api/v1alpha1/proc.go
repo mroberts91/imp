@@ -46,11 +46,58 @@ type ProcTemplateSpec struct {
 	Resources                     ResourceRequirements `json:"resources,omitzero"`
 	LivenessProbe                 *Probe               `json:"livenessProbe,omitempty"`
 	ReadinessProbe                *Probe               `json:"readinessProbe,omitempty"`
+	// StartupProbe, while present and not yet succeeded, holds liveness and
+	// readiness probing; its failure threshold restarts the process (kubelet
+	// semantics). Nil means no startup gate — M3 behavior. Like every M6
+	// field below it is never defaulted when nil, so pre-M6 template hashes
+	// stay stable and existing Daemons do not roll on upgrade.
+	StartupProbe *Probe `json:"startupProbe,omitempty"`
+	// Rlimits sets process resource limits (setrlimit) before exec, while
+	// still privileged — so hard limits may be raised (LimitNOFILE= parity).
+	// Like env, entry order is part of the template hash: reordering rolls
+	// the Daemon.
+	Rlimits []Rlimit `json:"rlimits,omitempty"`
+	// Nice is the scheduling priority, -20..19. Negative values need
+	// privilege (CAP_SYS_NICE). Nil = inherit (0).
+	Nice *int32 `json:"nice,omitempty"`
+	// OOMScoreAdjust is written to /proc/<pid>/oom_score_adj, -1000..1000.
+	// Negative values need privilege. Nil = inherit.
+	OOMScoreAdjust *int32 `json:"oomScoreAdjust,omitempty"`
+	// Umask is the file-mode creation mask as an octal string, e.g. "0022".
+	// Nil = inherit impd's umask.
+	Umask *string `json:"umask,omitempty"`
 	// LogRetention tunes per-proc log rotation. Nil means the built-in
 	// defaults (10 MiB, 3 backups, no age pruning), resolved by execd at
 	// consumption time — never defaulted here, so pre-M5 template hashes
 	// stay stable and existing Daemons do not roll on upgrade.
 	LogRetention *LogRetention `json:"logRetention,omitempty"`
+}
+
+// Rlimit sets one resource limit for the process. When only one of
+// soft/hard is given, both are set to that value (systemd LimitNOFILE=
+// semantics); -1 means unlimited (RLIM_INFINITY).
+type Rlimit struct {
+	// Resource is the lowercase RLIMIT_* name, e.g. "nofile", "core".
+	Resource string `json:"resource"`
+	Soft     *int64 `json:"soft,omitempty"`
+	Hard     *int64 `json:"hard,omitempty"`
+}
+
+// RlimitInfinity is the sentinel Soft/Hard value meaning RLIM_INFINITY.
+const RlimitInfinity = int64(-1)
+
+// Values resolves the M6-g one-implies-both rule into the pair to set.
+// Callers guarantee validity (at least one side present, checked by
+// validation).
+func (in Rlimit) Values() (soft, hard int64) {
+	switch {
+	case in.Soft != nil && in.Hard != nil:
+		return *in.Soft, *in.Hard
+	case in.Soft != nil:
+		return *in.Soft, *in.Soft
+	default:
+		return *in.Hard, *in.Hard
+	}
 }
 
 // LogRetention is the per-proc log rotation policy (doc 08 M5-d). It lives

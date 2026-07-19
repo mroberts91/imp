@@ -4,9 +4,14 @@
 package childsetup
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -35,9 +40,18 @@ var rlimitResources = map[string]int{
 
 // apply performs the setup in strict order — rlimits, oom_score_adj, and
 // nice while still privileged (raising a hard limit, a negative adjustment,
-// or a negative nice all need it: the systemd ordering), then the identity
-// drop, then umask, then execve. Returns only on error.
+// or a negative nice all need it: the systemd ordering), then privateTmp
+// and the bounding drops (both need capabilities the identity drop clears),
+// then the capability-aware identity drop, then noNewPrivileges (late, so
+// it cannot interfere with the privileged steps), then umask, then execve.
+// Returns only on error.
 func apply(p *Payload) error {
+	// Capability sets, prctl state, and namespaces are per-THREAD; only the
+	// syscall-package identity calls apply to all threads. Pin this
+	// goroutine so every step below and the final execve happen on the same
+	// OS thread — execve carries that thread's credentials and namespaces
+	// into the target.
+	runtime.LockOSThread()
 	for _, rl := range p.Rlimits {
 		res, ok := rlimitResources[rl.Resource]
 		if !ok {
@@ -60,9 +74,25 @@ func apply(p *Payload) error {
 			return fmt.Errorf("setpriority %d: %w", *p.Nice, err)
 		}
 	}
-	if p.User != "" || p.Group != "" {
-		if err := dropIdentity(p.User, p.Group); err != nil {
+	if p.PrivateTmp != nil && *p.PrivateTmp {
+		if err := setupPrivateTmp(); err != nil {
 			return err
+		}
+	}
+	var id *identity
+	if p.User != "" || p.Group != "" {
+		resolved, err := resolveIdentity(p.User, p.Group)
+		if err != nil {
+			return err
+		}
+		id = resolved
+	}
+	if err := executeSandbox(sandboxPlan(id, p.Capabilities)); err != nil {
+		return err
+	}
+	if p.NoNewPrivileges != nil && *p.NoNewPrivileges {
+		if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+			return fmt.Errorf("setting no_new_privs: %w", err)
 		}
 	}
 	if p.Umask != nil {
@@ -75,28 +105,139 @@ func apply(p *Payload) error {
 	return unix.Exec(p.Exe, p.Argv, os.Environ())
 }
 
-// dropIdentity applies groups → gid → uid, in that order (groups need
-// privilege, so they go first). The syscall package variants apply to all
-// runtime threads (Go ≥1.16 AllThreadsSyscall support).
-func dropIdentity(userName, groupName string) error {
-	id, err := resolveIdentity(userName, groupName)
-	if err != nil {
-		return err
-	}
-	if err := syscall.Setgroups(id.groups); err != nil {
-		return fmt.Errorf("setgroups %v: %w", id.groups, err)
-	}
-	if id.gid >= 0 {
-		if err := syscall.Setgid(id.gid); err != nil {
-			return fmt.Errorf("setgid %d: %w", id.gid, err)
-		}
-	}
-	if id.uid >= 0 {
-		if err := syscall.Setuid(id.uid); err != nil {
-			return fmt.Errorf("setuid %d: %w", id.uid, err)
+// executeSandbox performs the plan's steps in order. The identity syscalls
+// use the syscall package (all runtime threads, Go ≥1.16 AllThreadsSyscall
+// support); the capability and prctl steps act on the locked thread only —
+// the one that will execve.
+func executeSandbox(steps []step) error {
+	lastCap := kernelLastCap()
+	for _, s := range steps {
+		switch s.op {
+		case opCapBsetDrop:
+			name := s.arg.(string)
+			if capNumbers[name] > lastCap {
+				// The running kernel predates this capability: it cannot be
+				// in any bounding set, so there is nothing to drop (and the
+				// prctl would fail EINVAL).
+				continue
+			}
+			if err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(capNumbers[name]), 0, 0, 0); err != nil {
+				return fmt.Errorf("dropping capability %s from the bounding set: %w", name, err)
+			}
+		case opKeepcapsOn:
+			if err := unix.Prctl(unix.PR_SET_KEEPCAPS, 1, 0, 0, 0); err != nil {
+				return fmt.Errorf("enabling keep-caps: %w", err)
+			}
+		case opSetgroups:
+			groups := s.arg.([]int)
+			if err := syscall.Setgroups(groups); err != nil {
+				return fmt.Errorf("setgroups %v: %w", groups, err)
+			}
+		case opSetgid:
+			gid := s.arg.(int)
+			if err := syscall.Setgid(gid); err != nil {
+				return fmt.Errorf("setgid %d: %w", gid, err)
+			}
+		case opSetuid:
+			uid := s.arg.(int)
+			if err := syscall.Setuid(uid); err != nil {
+				return fmt.Errorf("setuid %d: %w", uid, err)
+			}
+		case opCapsetInheritable:
+			if err := capsetInheritable(s.arg.([]string)); err != nil {
+				return err
+			}
+		case opAmbientRaise:
+			name := s.arg.(string)
+			if err := unix.Prctl(unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_RAISE, uintptr(capNumbers[name]), 0, 0); err != nil {
+				return fmt.Errorf("raising ambient capability %s: %w", name, err)
+			}
+		case opKeepcapsOff:
+			if err := unix.Prctl(unix.PR_SET_KEEPCAPS, 0, 0, 0, 0); err != nil {
+				return fmt.Errorf("disabling keep-caps: %w", err)
+			}
+		default:
+			return fmt.Errorf("unknown sandbox step %q", s.op)
 		}
 	}
 	return nil
+}
+
+// capsetInheritable sets the calling thread's inheritable capability set to
+// exactly the named capabilities, passing permitted and effective through
+// unchanged. Uses the V3 (64-bit) header: capget/capset read and write two
+// CapUserData words through the pointer to the array's first element.
+func capsetInheritable(names []string) error {
+	hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if err := unix.Capget(&hdr, &data[0]); err != nil {
+		return fmt.Errorf("capget: %w", err)
+	}
+	data[0].Inheritable, data[1].Inheritable = 0, 0
+	for _, name := range names {
+		if n := capNumbers[name]; n < 32 {
+			data[0].Inheritable |= 1 << n
+		} else {
+			data[1].Inheritable |= 1 << (n - 32)
+		}
+	}
+	if err := unix.Capset(&hdr, &data[0]); err != nil {
+		return fmt.Errorf("capset inheritable %v: %w", names, err)
+	}
+	return nil
+}
+
+// setupPrivateTmp gives this (locked) thread a private mount namespace with
+// a fresh tmpfs over /tmp and /var/tmp; execve carries the namespace into
+// the target. Needs CAP_SYS_ADMIN — rootless this fails EPERM into the
+// exit-126 path. Already-open fds (log writers, sockets) are unaffected by
+// the new namespace. Note the working directory was chdir'ed before the
+// shim ran and stays pinned: a workingDir under /tmp keeps referencing the
+// host directory it resolved to at spawn, not the private tmpfs.
+func setupPrivateTmp() error {
+	if err := unix.Unshare(unix.CLONE_NEWNS); err != nil {
+		return fmt.Errorf("unsharing mount namespace: %w", err)
+	}
+	// The recursive slave remount is load-bearing: systemd hosts mount /
+	// shared by default, and without it the tmpfs mounts below would
+	// propagate back to the host.
+	if err := unix.Mount("none", "/", "", unix.MS_REC|unix.MS_SLAVE, ""); err != nil {
+		return fmt.Errorf("making mount propagation slave: %w", err)
+	}
+	mounted := map[string]bool{}
+	for _, dir := range []string{"/tmp", "/var/tmp"} {
+		// /var/tmp may be a symlink (sometimes to /tmp itself): mount the
+		// resolved target, tolerating only its absence.
+		target, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("resolving %s: %w", dir, err)
+		}
+		if mounted[target] {
+			continue
+		}
+		if err := unix.Mount("tmpfs", target, "tmpfs", 0, "mode=1777"); err != nil {
+			return fmt.Errorf("mounting tmpfs on %s: %w", target, err)
+		}
+		mounted[target] = true
+	}
+	return nil
+}
+
+// kernelLastCap reads the highest capability number the running kernel
+// supports, falling back to the full table when unreadable.
+func kernelLastCap() int {
+	b, err := os.ReadFile("/proc/sys/kernel/cap_last_cap")
+	if err != nil {
+		return len(capNumbers) - 1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return len(capNumbers) - 1
+	}
+	return n
 }
 
 func rlimValue(v int64) uint64 {

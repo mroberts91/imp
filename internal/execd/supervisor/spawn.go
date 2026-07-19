@@ -52,14 +52,17 @@ func buildCmd(p *v1alpha1.Proc, stdout, stderr io.Writer) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("proc %s: %w", p.Metadata.Name, err)
 	}
 	payload := childsetup.Payload{
-		Exe:            exe,
-		Argv:           p.Spec.Command,
-		User:           p.Spec.User,
-		Group:          p.Spec.Group,
-		Rlimits:        p.Spec.Rlimits,
-		Nice:           p.Spec.Nice,
-		OOMScoreAdjust: p.Spec.OOMScoreAdjust,
-		Umask:          p.Spec.Umask,
+		Exe:             exe,
+		Argv:            p.Spec.Command,
+		User:            p.Spec.User,
+		Group:           p.Spec.Group,
+		Rlimits:         p.Spec.Rlimits,
+		Nice:            p.Spec.Nice,
+		OOMScoreAdjust:  p.Spec.OOMScoreAdjust,
+		Umask:           p.Spec.Umask,
+		NoNewPrivileges: p.Spec.NoNewPrivileges,
+		Capabilities:    p.Spec.Capabilities,
+		PrivateTmp:      p.Spec.PrivateTmp,
 	}
 	entry, err := payload.EnvEntry()
 	if err != nil {

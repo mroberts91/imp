@@ -22,11 +22,37 @@ The template speaks systemd's process-control dialect
 | `UMask=0027` | `umask: "0027"` |
 | `CPUQuota=50%` | `resources.limits.cpu: "500m"` |
 | `User=`/`Group=` | `user:` / `group:` |
+| `NoNewPrivileges=yes` | `noNewPrivileges: true` |
+| `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` | `capabilities.bounding: [net_bind_service]` (keep ONLY the listed caps) |
+| `AmbientCapabilities=CAP_NET_BIND_SERVICE` | `capabilities.ambient: [net_bind_service]` (grant to a non-root `user:`) |
+| `PrivateTmp=yes` | `privateTmp: true` |
 
 Setup runs inside the child before exec, in systemd's order: rlimits while
 still privileged (hard limits can be *raised* under a root impd), then
-oom_score_adj and nice, then the identity drop, then umask. A setup failure
-exits 126 with an `imp child-setup: …` line in the Proc's own log.
+oom_score_adj and nice, then privateTmp and the capability bounding drops
+(both need capabilities the identity drop clears), then the
+capability-aware identity drop (with the ambient raise when requested),
+then noNewPrivileges, then umask. A setup failure exits 126 with an
+`imp child-setup: …` line in the Proc's own log.
+
+**Sandboxing needs privilege.** `capabilities` (CAP_SETPCAP) and
+`privateTmp` (CAP_SYS_ADMIN) only take effect under a privileged impd;
+under a rootless impd they fail *loudly* — the Proc crash-loops with the
+EPERM reason one `impctl logs` away — never silently no-op (the same
+honesty posture as the fake cgroup root). `noNewPrivileges` works rootless.
+Capability names are lowercase without the `CAP_` prefix; ambient names
+must also appear in `bounding` when both lists are set; an empty bounding
+list ("drop everything") is deliberately not expressible — run as an
+unprivileged `user:` with `noNewPrivileges` instead. See
+[examples/12](../examples/12-sandboxed-daemon.yaml) for the "nginx as
+www-data on port 80" shape.
+
+Sandbox settings are spawn-time: a Proc re-attached after an impd restart
+(D1 adoption) is trusted to be what its status says — they cannot be
+re-verified or re-applied, same as rlimits and nice. Note that with
+`privateTmp` a `workingDir` under `/tmp` keeps referencing the host
+directory it resolved to at spawn (the chdir happens before the namespace
+setup), so use absolute paths at runtime to reach the private tmpfs.
 
 Note (M6 behavior change): when `user:` is set, the process now gets that
 user's **supplementary groups** (initgroups semantics, as systemd does).
@@ -63,6 +89,14 @@ deadline.
   controller recreate them — `systemctl restart` semantics (all replicas at
   once, brief downtime). The spec is untouched, so nothing fights the
   manifest directory.
+- `impctl restart --rolling DAEMON` replaces procs one ordinal at a time
+  (highest first, the RollingUpdate direction), waiting for each
+  replacement to be *available* — Ready, plus `minReadySeconds` when set —
+  before moving on. The per-ordinal wait budget is the daemon's own
+  `progressDeadlineSeconds`; on timeout the walk exits nonzero and the
+  controller's level-triggered convergence owns the rest (check
+  `impctl rollout status`). With `replicas: 1` it is still a full-stop
+  restart with a wait.
 - `impctl run TIMER` fires a timer's run immediately (`{timer}-manual-<ts>`,
   annotated `impd.sh/manual`). Manual runs count as active for
   `concurrencyPolicy` but never advance `lastScheduleTime`.
@@ -130,3 +164,13 @@ to 72h (`--event-ttl`).
 
 Set `IMP_CGROUP_ROOT` to a writable cgroup v2 path when running
 `internal/execd/cgroups` Linux integration tests against a real hierarchy.
+
+## Contributor: root sandbox tests
+
+The capability and privateTmp *enforcement* paths need root and are gated
+behind an explicit opt-in (the rootless gates only prove validation and
+the honest-failure paths):
+
+```sh
+sudo IMP_ROOT_SANDBOX_TESTS=1 go test -run TestRootSandbox ./internal/execd/childsetup/
+```

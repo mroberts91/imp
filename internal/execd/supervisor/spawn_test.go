@@ -34,10 +34,16 @@ func TestBuildCmdShimPayload(t *testing.T) {
 	p := &v1alpha1.Proc{
 		Metadata: v1alpha1.ObjectMeta{Name: "web-0"},
 		Spec: v1alpha1.ProcSpec{
-			Command: []string{"/bin/sleep", "300"},
-			Rlimits: []v1alpha1.Rlimit{{Resource: "nofile", Soft: new(int64(256))}},
-			Nice:    new(int32(5)),
-			Umask:   new("0077"),
+			Command:         []string{"/bin/sleep", "300"},
+			Rlimits:         []v1alpha1.Rlimit{{Resource: "nofile", Soft: new(int64(256))}},
+			Nice:            new(int32(5)),
+			Umask:           new("0077"),
+			NoNewPrivileges: new(true),
+			Capabilities: &v1alpha1.Capabilities{
+				Bounding: []string{"net_bind_service"},
+				Ambient:  []string{"net_bind_service"},
+			},
+			PrivateTmp: new(true),
 		},
 	}
 	cmd, err := buildCmd(p, io.Discard, io.Discard)
@@ -62,6 +68,17 @@ func TestBuildCmdShimPayload(t *testing.T) {
 	}
 	if pl.Umask == nil || *pl.Umask != "0077" {
 		t.Errorf("payload.Umask = %v, want 0077", pl.Umask)
+	}
+	if pl.NoNewPrivileges == nil || !*pl.NoNewPrivileges {
+		t.Errorf("payload.NoNewPrivileges = %v, want true", pl.NoNewPrivileges)
+	}
+	if pl.Capabilities == nil ||
+		len(pl.Capabilities.Bounding) != 1 || pl.Capabilities.Bounding[0] != "net_bind_service" ||
+		len(pl.Capabilities.Ambient) != 1 || pl.Capabilities.Ambient[0] != "net_bind_service" {
+		t.Errorf("payload.Capabilities = %+v, want the spec's bounding/ambient lists", pl.Capabilities)
+	}
+	if pl.PrivateTmp == nil || !*pl.PrivateTmp {
+		t.Errorf("payload.PrivateTmp = %v, want true", pl.PrivateTmp)
 	}
 }
 

@@ -67,6 +67,44 @@ func IsKnownRlimit(name string) bool {
 	return knownRlimits[name]
 }
 
+// knownCapabilities are the lowercase Linux capability names (without the
+// CAP_ prefix, M7-a) accepted in spec.capabilities — all 41 capabilities,
+// CAP_CHOWN (0) through CAP_CHECKPOINT_RESTORE (40). Hand-rolled table (no
+// x/sys import) for the same reason as knownSignals; the childsetup shim
+// owns the name → CAP_* constant mapping and pins it against this list.
+var knownCapabilities = map[string]bool{
+	"chown": true, "dac_override": true, "dac_read_search": true,
+	"fowner": true, "fsetid": true, "kill": true, "setgid": true,
+	"setuid": true, "setpcap": true, "linux_immutable": true,
+	"net_bind_service": true, "net_broadcast": true, "net_admin": true,
+	"net_raw": true, "ipc_lock": true, "ipc_owner": true,
+	"sys_module": true, "sys_rawio": true, "sys_chroot": true,
+	"sys_ptrace": true, "sys_pacct": true, "sys_admin": true,
+	"sys_boot": true, "sys_nice": true, "sys_resource": true,
+	"sys_time": true, "sys_tty_config": true, "mknod": true,
+	"lease": true, "audit_write": true, "audit_control": true,
+	"setfcap": true, "mac_override": true, "mac_admin": true,
+	"syslog": true, "wake_alarm": true, "block_suspend": true,
+	"audit_read": true, "perfmon": true, "bpf": true,
+	"checkpoint_restore": true,
+}
+
+// IsKnownCapability reports whether name is a recognized capability name.
+func IsKnownCapability(name string) bool {
+	return knownCapabilities[name]
+}
+
+// KnownCapabilityNames returns the accepted capability names, sorted. The
+// childsetup shim pins its CAP_* mapping against this list in tests.
+func KnownCapabilityNames() []string {
+	names := make([]string, 0, len(knownCapabilities))
+	for name := range knownCapabilities {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
 // KnownRlimitNames returns the accepted rlimit resource names, sorted. The
 // childsetup shim pins its RLIMIT_* mapping against this list in tests.
 func KnownRlimitNames() []string {
@@ -274,6 +312,57 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 	}
 	if s.LogRetention != nil {
 		errs = append(errs, validateLogRetention(s.LogRetention, p.Child("logRetention"))...)
+	}
+	if s.Capabilities != nil {
+		errs = append(errs, validateCapabilities(s.Capabilities, p.Child("capabilities"))...)
+	}
+	return errs
+}
+
+func validateCapabilities(c *Capabilities, p *Path) ErrorList {
+	var errs ErrorList
+	if len(c.Bounding) == 0 && len(c.Ambient) == 0 {
+		return ErrorList{requiredErr(p, "at least one of bounding or ambient is required")}
+	}
+	// M7-g: an explicit empty bounding list ("drop every capability") is not
+	// expressible — omitempty makes it indistinguishable from absent after a
+	// storage round-trip, and silently flipping "drop all" to "don't touch"
+	// is not acceptable. Run as a user with noNewPrivileges instead.
+	if c.Bounding != nil && len(c.Bounding) == 0 {
+		errs = append(errs, invalidErr(p.Child("bounding"), c.Bounding,
+			"must name at least one capability to keep; dropping every capability is not supported — run as an unprivileged user with noNewPrivileges instead"))
+	}
+	errs = append(errs, validateCapabilityList(c.Bounding, p.Child("bounding"))...)
+	errs = append(errs, validateCapabilityList(c.Ambient, p.Child("ambient"))...)
+	// M7-h: an ambient cap outside the bounding set is a self-contradiction
+	// ("keep only these" vs "also grant that one"). systemd resolves it by
+	// silently unioning ambient into the bounding set; imp rejects it.
+	if len(c.Bounding) > 0 && len(c.Ambient) > 0 {
+		for i, name := range c.Ambient {
+			if IsKnownCapability(name) && !slices.Contains(c.Bounding, name) {
+				errs = append(errs, invalidErr(p.Child("ambient").Index(i), name,
+					"must also be listed in bounding (an ambient capability outside the bounding set is a contradiction)"))
+			}
+		}
+	}
+	return errs
+}
+
+func validateCapabilityList(names []string, p *Path) ErrorList {
+	var errs ErrorList
+	seen := map[string]bool{}
+	for i, name := range names {
+		switch {
+		case name == "":
+			errs = append(errs, requiredErr(p.Index(i), ""))
+		case !IsKnownCapability(name):
+			errs = append(errs, invalidErr(p.Index(i), name,
+				"must be a lowercase capability name without the CAP_ prefix, e.g. net_bind_service"))
+		case seen[name]:
+			errs = append(errs, invalidErr(p.Index(i), name, "duplicate capability"))
+		default:
+			seen[name] = true
+		}
 	}
 	return errs
 }

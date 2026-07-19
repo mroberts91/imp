@@ -184,6 +184,13 @@ tasks:
       - bash scripts/m6-acceptance.sh
     platforms: [linux]
 
+  accept:m7:
+    desc: Rootless M7 acceptance (noNewPrivileges, capability validation, 126-honesty, restart --rolling)
+    deps: [build]
+    cmds:
+      - bash scripts/m7-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

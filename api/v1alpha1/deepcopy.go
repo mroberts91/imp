@@ -137,6 +137,26 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 	if in.LogRetention != nil {
 		out.LogRetention = in.LogRetention.DeepCopy()
 	}
+	if in.NoNewPrivileges != nil {
+		out.NoNewPrivileges = new(*in.NoNewPrivileges)
+	}
+	if in.Capabilities != nil {
+		out.Capabilities = in.Capabilities.DeepCopy()
+	}
+	if in.PrivateTmp != nil {
+		out.PrivateTmp = new(*in.PrivateTmp)
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *Capabilities) DeepCopy() *Capabilities {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Bounding = slices.Clone(in.Bounding)
+	out.Ambient = slices.Clone(in.Ambient)
 	return &out
 }
 

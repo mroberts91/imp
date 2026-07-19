@@ -57,6 +57,12 @@ type Payload struct {
 	Nice           *int32            `json:"nice,omitempty"`
 	OOMScoreAdjust *int32            `json:"oomScoreAdjust,omitempty"`
 	Umask          *string           `json:"umask,omitempty"`
+	// M7 sandbox knobs. NoNewPrivileges works rootless; Capabilities and
+	// PrivateTmp need a privileged impd and fail honestly through the
+	// exit-126 path otherwise.
+	NoNewPrivileges *bool                  `json:"noNewPrivileges,omitempty"`
+	Capabilities    *v1alpha1.Capabilities `json:"capabilities,omitempty"`
+	PrivateTmp      *bool                  `json:"privateTmp,omitempty"`
 }
 
 // EnvEntry renders the payload as the "NAME=json" environment entry the

@@ -49,6 +49,10 @@ func TestDaemonDeepCopy(t *testing.T) {
 	*cp.Spec.Template.Spec.Nice = -1
 	*cp.Spec.Template.Spec.OOMScoreAdjust = 1
 	*cp.Spec.Template.Spec.Umask = "0777"
+	*cp.Spec.Template.Spec.NoNewPrivileges = false
+	cp.Spec.Template.Spec.Capabilities.Bounding[0] = "mutated"
+	cp.Spec.Template.Spec.Capabilities.Ambient[0] = "mutated"
+	*cp.Spec.Template.Spec.PrivateTmp = false
 	cp.Status.Conditions[0].Status = ConditionTrue
 
 	if after := snapshot(t, orig); after != before {

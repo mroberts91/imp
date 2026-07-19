@@ -1,0 +1,41 @@
+# 12 — Sandboxing: run a port-80 service as an unprivileged user (M7).
+#
+#   User=www-data                            ->  user: www-data
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE ->  capabilities.ambient
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE -> capabilities.bounding
+#   NoNewPrivileges=yes                      ->  noNewPrivileges: true
+#   PrivateTmp=yes                           ->  privateTmp: true
+#
+# The classic "nginx as www-data on port 80" story: the identity drops to
+# www-data, but net_bind_service is raised into the ambient capability set
+# so it survives exec — bind port 80 without root. The bounding set keeps
+# ONLY the listed capabilities (everything else is dropped even for
+# privileged helpers); noNewPrivileges stops setuid binaries and file
+# capabilities from ever elevating again; privateTmp mounts a fresh tmpfs
+# over /tmp and /var/tmp in a private mount namespace.
+#
+# NEEDS ROOT: capabilities (CAP_SETPCAP) and privateTmp (CAP_SYS_ADMIN)
+# only take effect under a privileged impd (the systemd/OpenRC installs).
+# Under a rootless impd they fail loudly — the Proc crash-loops with the
+# EPERM reason in `impctl logs` — never silently no-op. noNewPrivileges
+# alone works rootless.
+#
+# Capability names are lowercase without the CAP_ prefix. Ambient names
+# must also appear in bounding when both lists are set; an empty bounding
+# list ("drop everything") is deliberately not expressible — run as an
+# unprivileged user with noNewPrivileges instead.
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: sandboxed-web
+spec:
+  template:
+    spec:
+      # A stand-in for nginx: proves the bind works below 1024 as non-root.
+      command: ["python3", "-m", "http.server", "80"]
+      user: www-data
+      noNewPrivileges: true
+      privateTmp: true
+      capabilities:
+        bounding: [net_bind_service]
+        ambient: [net_bind_service]

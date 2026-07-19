@@ -104,24 +104,45 @@ func TestHashProcTemplateSensitivity(t *testing.T) {
 	if HashProcTemplate(withStartup) == base {
 		t.Error("startupProbe addition did not change hash")
 	}
+
+	withNNP := templateForHash()
+	withNNP.Spec.NoNewPrivileges = new(true)
+	if HashProcTemplate(withNNP) == base {
+		t.Error("noNewPrivileges addition did not change hash")
+	}
+
+	withCaps := templateForHash()
+	withCaps.Spec.Capabilities = &Capabilities{Ambient: []string{"net_bind_service"}}
+	if HashProcTemplate(withCaps) == base {
+		t.Error("capabilities addition did not change hash")
+	}
+
+	withPrivateTmp := templateForHash()
+	withPrivateTmp.Spec.PrivateTmp = new(true)
+	if HashProcTemplate(withPrivateTmp) == base {
+		t.Error("privateTmp addition did not change hash")
+	}
 }
 
-// TestHashProcTemplateM6NilFieldsStable pins that a template leaving every
-// M6 field nil hashes exactly as it did before M6 existed (the golden in
-// TestHashProcTemplateGolden). This is the upgrade guarantee: pre-M6 Daemons
-// must not roll when impd is upgraded. If this fails, an M6 field leaked
-// into the canonical serialization (a default materialized, or omitempty
-// was dropped).
-func TestHashProcTemplateM6NilFieldsStable(t *testing.T) {
+// TestHashProcTemplateNilFieldsStable pins that a template leaving every
+// M6 and M7 field nil hashes exactly as it did before those milestones
+// existed (the golden in TestHashProcTemplateGolden). This is the upgrade
+// guarantee: pre-existing Daemons must not roll when impd is upgraded. If
+// this fails, a milestone field leaked into the canonical serialization (a
+// default materialized, or omitempty was dropped).
+func TestHashProcTemplateNilFieldsStable(t *testing.T) {
 	tpl := templateForHash()
-	if tpl.Spec.StartupProbe != nil || tpl.Spec.Rlimits != nil || tpl.Spec.Nice != nil ||
-		tpl.Spec.OOMScoreAdjust != nil || tpl.Spec.Umask != nil {
-		t.Fatal("fixture must leave M6 fields nil")
+	nilFieldsNil := func() bool {
+		return tpl.Spec.StartupProbe == nil && tpl.Spec.Rlimits == nil && tpl.Spec.Nice == nil &&
+			tpl.Spec.OOMScoreAdjust == nil && tpl.Spec.Umask == nil &&
+			tpl.Spec.NoNewPrivileges == nil && tpl.Spec.Capabilities == nil && tpl.Spec.PrivateTmp == nil
+	}
+	if !nilFieldsNil() {
+		t.Fatal("fixture must leave M6/M7 fields nil")
 	}
 	defaultProcTemplateSpec(&tpl.Spec) // defaulting must not materialize them
-	if tpl.Spec.StartupProbe != nil || tpl.Spec.Rlimits != nil || tpl.Spec.Nice != nil ||
-		tpl.Spec.OOMScoreAdjust != nil || tpl.Spec.Umask != nil {
-		t.Fatal("defaulting materialized an M6 template field — this rolls every pre-M6 Daemon on upgrade")
+	if !nilFieldsNil() {
+		t.Fatal("defaulting materialized an M6/M7 template field — this rolls every pre-existing Daemon on upgrade")
 	}
 	const golden = "8233565f"
 	if got := HashProcTemplate(tpl); got != golden {

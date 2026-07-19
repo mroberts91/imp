@@ -412,6 +412,70 @@ func TestValidateDaemon(t *testing.T) {
 			wantFields: nil,
 		},
 		{
+			name: "capabilities ok",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{
+					Bounding: []string{"net_bind_service", "chown"},
+					Ambient:  []string{"net_bind_service"},
+				}
+			},
+			wantFields: nil,
+		},
+		{
+			name: "capabilities ambient only ok",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{
+					Ambient: []string{"net_bind_service"},
+				}
+			},
+			wantFields: nil,
+		},
+		{
+			name: "capabilities empty struct",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{}
+			},
+			wantFields: []string{"spec.template.spec.capabilities"},
+		},
+		{
+			name: "capabilities explicit empty bounding",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{
+					Bounding: []string{},
+					Ambient:  []string{"net_bind_service"},
+				}
+			},
+			wantFields: []string{"spec.template.spec.capabilities.bounding"},
+		},
+		{
+			name: "capability unknown name",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{
+					Bounding: []string{"CAP_NET_BIND_SERVICE"},
+				}
+			},
+			wantFields: []string{"spec.template.spec.capabilities.bounding[0]"},
+		},
+		{
+			name: "capability duplicate",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{
+					Ambient: []string{"chown", "chown"},
+				}
+			},
+			wantFields: []string{"spec.template.spec.capabilities.ambient[1]"},
+		},
+		{
+			name: "ambient outside bounding",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Capabilities = &Capabilities{
+					Bounding: []string{"net_bind_service"},
+					Ambient:  []string{"chown"},
+				}
+			},
+			wantFields: []string{"spec.template.spec.capabilities.ambient[0]"},
+		},
+		{
 			name:       "negative minReadySeconds",
 			mutate:     func(d *Daemon) { d.Spec.MinReadySeconds = -1 },
 			wantFields: []string{"spec.minReadySeconds"},

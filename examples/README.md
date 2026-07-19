@@ -7,10 +7,10 @@ toward it — restarts, replicas, updates, and cleanup included.
 The examples here are a tutorial. Each file is self-contained and commented;
 read them in order.
 
-> **Status:** M1–M6 are complete. Controllers expand Daemons into Procs;
-> execd starts and restarts them; RollingUpdate, Timers, hardening fields,
-> and the `restart`/`run`/`rollout status` verbs all work.
-> Try the “watch it run” commands below.
+> **Status:** M1–M7 are complete. Controllers expand Daemons into Procs;
+> execd starts and restarts them; RollingUpdate, Timers, hardening and
+> sandboxing fields, and the `restart [--rolling]`/`run`/`rollout status`
+> verbs all work. Try the “watch it run” commands below.
 
 ## Setup
 
@@ -49,6 +49,7 @@ events`); you never author it.
 | Advanced | [`09-log-retention.yaml`](09-log-retention.yaml) | Per-daemon log rotation policy |
 | Advanced | [`10-hardened-daemon.yaml`](10-hardened-daemon.yaml) | Unit-file hardening: `rlimits`, `nice`, `oomScoreAdjust`, `umask`, `limits.cpu` |
 | Advanced | [`11-startup-probe.yaml`](11-startup-probe.yaml) | `startupProbe`: protecting slow starters from liveness |
+| Advanced | [`12-sandboxed-daemon.yaml`](12-sandboxed-daemon.yaml) | Sandboxing: `capabilities` (bind port 80 as non-root), `noNewPrivileges`, `privateTmp` |
 
 Work through one:
 

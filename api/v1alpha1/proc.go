@@ -71,6 +71,33 @@ type ProcTemplateSpec struct {
 	// consumption time — never defaulted here, so pre-M5 template hashes
 	// stay stable and existing Daemons do not roll on upgrade.
 	LogRetention *LogRetention `json:"logRetention,omitempty"`
+	// NoNewPrivileges sets PR_SET_NO_NEW_PRIVS before exec: the process and
+	// its descendants can never gain privileges (setuid/setgid binaries and
+	// file capabilities stop elevating). Works rootless. Nil = off.
+	NoNewPrivileges *bool `json:"noNewPrivileges,omitempty"`
+	// Capabilities constrains (bounding) or grants (ambient) Linux
+	// capabilities. Applying it needs a privileged impd. Nil = kernel
+	// defaults.
+	Capabilities *Capabilities `json:"capabilities,omitempty"`
+	// PrivateTmp gives the process its own tmpfs over /tmp and /var/tmp in
+	// a private mount namespace. Needs a privileged impd. Nil = off.
+	PrivateTmp *bool `json:"privateTmp,omitempty"`
+}
+
+// Capabilities is systemd-shaped (CapabilityBoundingSet= /
+// AmbientCapabilities=), not k8s add/drop (M7-a). Names are lowercase
+// without the CAP_ prefix, e.g. "net_bind_service".
+type Capabilities struct {
+	// Bounding: keep ONLY these capabilities in the bounding set — every
+	// other capability is dropped while still privileged (the root-daemon
+	// containment case). At least one name when present (M7-g: "drop every
+	// capability" is not expressible; run as a user with noNewPrivileges
+	// instead).
+	Bounding []string `json:"bounding,omitempty"`
+	// Ambient: raise these into the ambient set so they survive exec for a
+	// non-root process — the "bind port 80 as www-data" mechanism. Must be
+	// a subset of bounding when both are set (M7-h).
+	Ambient []string `json:"ambient,omitempty"`
 }
 
 // Rlimit sets one resource limit for the process. When only one of

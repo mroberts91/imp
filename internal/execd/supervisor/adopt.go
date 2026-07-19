@@ -145,7 +145,14 @@ func (w *worker) bindAdopted(p *v1alpha1.Proc, pid int, ticks int64, cgPath stri
 	w.rt.CgroupPath = cgPath
 	w.rt.Adopted = true
 	w.cmd = nil
-	w.startAdoptWatch(pid)
+	// Prefer a pidfd watch: it pins the process identity (no pid-reuse
+	// races) and reports exit immediately instead of on the poll cadence.
+	if fd, ok := openVerifiedPidfd(pid, ticks); ok {
+		w.adoptPidfd = fd
+		w.startPidfdWatch()
+	} else {
+		w.startAdoptWatch(pid)
+	}
 	w.publishCgroupSnap(p)
 	w.startProbes(p)
 }
@@ -185,6 +192,7 @@ func (w *worker) stopAdoptWatch() {
 		}
 		w.adoptWatchStop = nil
 	}
+	w.closePidfdWatch()
 }
 
 var errAdoptedExited = fmt.Errorf("adopted process exited")

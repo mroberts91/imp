@@ -51,6 +51,10 @@ type worker struct {
 	exitCh         chan exitResult
 	probeCh        chan probes.ResultEvent
 	adoptWatchStop chan struct{}
+	// pidfd watch state (linux; zero when the legacy poll watch is used).
+	adoptPidfd     int
+	adoptPollW     int
+	adoptPidfdDone chan struct{}
 }
 
 func newWorker(m *Manager, key string) *worker {
@@ -322,8 +326,10 @@ func (w *worker) doStop(ctx context.Context, p *v1alpha1.Proc) {
 			w.logs.CloseCapture(w.name)
 		}
 	} else {
-		// Adopted process: signal the pgid/pid, then rely on cgroup Kill.
-		if w.rt.PID > 0 {
+		// Adopted process: signal it, then rely on cgroup Kill for the
+		// group. The pidfd path cannot mis-target a recycled pid; the
+		// group kill remains the fallback for legacy watches.
+		if w.rt.PID > 0 && !w.signalAdopted(mustSignal(sig)) {
 			_ = killGroup(w.rt.PID, mustSignal(sig))
 		}
 		w.stopAdoptWatch()

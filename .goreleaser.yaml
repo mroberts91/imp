@@ -6,53 +6,82 @@ before:
   hooks:
     - go mod tidy
 
-# 1. CROSS-COMPILATION MATRIX
+# Two binaries (the M1+ layout): impd releases for Linux only — it is the
+# deploy target (cgroups, execd, systemd/OpenRC bootstrap); a darwin impd
+# would build but cannot run a host. impctl releases wherever an operator
+# might sit. CGO stays off — the SQLite driver is pure Go for exactly this.
 builds:
-  - id: imp-api-server
-    main: ./cmd/imp-api-server
-    binary: imp-api-server
+  - id: impd
+    main: ./cmd/impd
+    binary: impd
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
+    goos: [linux]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.branch={{.Branch}}
+      - -X main.buildTime={{.Date}}
 
-  - id: imp-controllers
-    main: ./cmd/imp-controllers
-    binary: imp-controllers
+  # impctl is built per-OS so each archive has a uniform binary set
+  # (goreleaser refuses mixed-count multi-binary archives).
+  - id: impctl-linux
+    main: ./cmd/impctl
+    binary: impctl
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
+    goos: [linux]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.branch={{.Branch}}
+      - -X main.buildTime={{.Date}}
 
-  - id: imp-etcl
-    main: ./cmd/imp-etcl
-    binary: imp-etcl
+  - id: impctl-darwin
+    main: ./cmd/impctl
+    binary: impctl
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
+    goos: [darwin]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.branch={{.Branch}}
+      - -X main.buildTime={{.Date}}
 
-  - id: imp-execd
-    main: ./cmd/imp-execd
-    binary: imp-execd
-    env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
-    goarch: [amd64, arm64]
-
-# 2. PACKAGING
 archives:
-  - format: tar.gz
-    # Because we don't specify build IDs here, GoReleaser bundles ALL
-    # four binaries into a single archive for each OS/Arch combination.
+  # The host bundle: daemon + CLI + install scripts + example manifests.
+  - id: imp
+    builds: [impd, impctl-linux]
+    formats: [tar.gz]
     name_template: >-
       {{ .ProjectName }}_
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
       {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-    format_overrides:
-      - goos: windows
-        format: zip
+    files:
+      - LICENSE
+      - README.md
+      - bootstrap/**
+      - examples/*.yaml
+  # CLI-only archive for platforms that never run impd (darwin).
+  - id: impctl
+    builds: [impctl-darwin]
+    formats: [tar.gz]
+    name_template: >-
+      impctl_
+      {{- title .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else }}{{ .Arch }}{{ end }}
+    files:
+      - LICENSE
 
-# 3. AUTO-CHANGELOG
 changelog:
   sort: asc
   filters:
@@ -62,7 +91,7 @@ changelog:
       - '^ci:'
       - 'Merge pull request'
 
-# 4. ARTIFACT SIGNING (Keyless via Cosign & GitHub OIDC)
+# Keyless artifact signing via Cosign & GitHub OIDC.
 signs:
   - cmd: cosign
     certificate: '${artifact}.pem'
@@ -71,5 +100,5 @@ signs:
       - '--output-certificate=${certificate}'
       - '--output-signature=${signature}'
       - '${artifact}'
-      - '--yes' # Automatically accept the OIDC prompt in CI
+      - '--yes'
     artifacts: checksum

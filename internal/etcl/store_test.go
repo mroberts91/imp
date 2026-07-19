@@ -424,3 +424,29 @@ func TestOperationsAfterClose(t *testing.T) {
 		t.Errorf("second Close: %v", err)
 	}
 }
+
+func TestOpenRefusesLockedDataDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "etcl.db")
+
+	first, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+
+	// A second store on the same data dir — the split-brain a socket-level
+	// guard cannot see — must be refused while the first is open.
+	if _, err := Open(path, nil); !errors.Is(err, ErrLocked) {
+		t.Fatalf("second Open err = %v, want ErrLocked", err)
+	}
+
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Close releases the claim: reopening succeeds.
+	again, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("reopen after Close: %v", err)
+	}
+	again.Close()
+}

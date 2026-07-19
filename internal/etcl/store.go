@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -88,10 +89,18 @@ func (o *Options) withDefaults() Options {
 	return out
 }
 
+// ErrLocked reports that another process holds the store's data directory.
+// The socket-level guard in apiserver.Listen catches a second impd on the
+// same socket; this catches the split-brain the 2026-07-11 incident hit —
+// a second impd pointed at the SAME data dir through a DIFFERENT socket
+// (two writers on one SQLite file corrupt rv monotonicity).
+var ErrLocked = errors.New("etcl: data directory is locked by another process")
+
 // Store is the object store
 type Store struct {
 	db   *sql.DB
 	opts Options
+	lock *os.File
 
 	mu            sync.RWMutex
 	closed        bool
@@ -104,21 +113,29 @@ type Store struct {
 }
 
 func Open(path string, opts *Options) (*Store, error) {
+	lock, err := acquireLock(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
+		lock.Close()
 		return nil, fmt.Errorf("etcl: opening %s: %w", path, err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
+		lock.Close()
 		return nil, fmt.Errorf("etcl: initializing schema: %w", err)
 	}
-	s := &Store{db: db, opts: opts.withDefaults(), watchers: map[int64]*watcher{}}
+	s := &Store{db: db, opts: opts.withDefaults(), lock: lock, watchers: map[int64]*watcher{}}
 	if s.rv, err = s.loadMeta("rv"); err != nil {
 		db.Close()
+		lock.Close()
 		return nil, err
 	}
 	if s.compactedRV, err = s.loadMeta("compacted_rv"); err != nil {
 		db.Close()
+		lock.Close()
 		return nil, err
 	}
 	return s, nil
@@ -151,7 +168,13 @@ func (s *Store) Close() error {
 	s.mu.Unlock()
 
 	s.pumps.Wait()
-	return s.db.Close()
+	err := s.db.Close()
+	// Releasing the flock last: the data dir stays claimed until the
+	// database is actually closed.
+	if s.lock != nil {
+		s.lock.Close()
+	}
+	return err
 }
 
 // Get returns the current body of the object, or ErrNotFound.

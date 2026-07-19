@@ -63,12 +63,19 @@ type Syncer interface {
 // worker goroutines that feed queue keys to the Reconciler until the
 // context ends and the queue drains.
 type Runner struct {
-	name       string
-	queue      queue.RateLimitingInterface
-	reconciler Reconciler
-	workers    int
-	gates      []Syncer
-	log        *slog.Logger
+	name           string
+	queue          queue.RateLimitingInterface
+	reconciler     Reconciler
+	workers        int
+	gates          []Syncer
+	log            *slog.Logger
+	metrics        reconcileMetrics
+	metricsControl string
+}
+
+// reconcileMetrics is the slice of internal/metrics the Runner needs.
+type reconcileMetrics interface {
+	ObserveReconcile(controller string, d time.Duration, failed bool)
 }
 
 // NewRunner builds a Runner named name (the slog component key) around q
@@ -87,6 +94,13 @@ func NewRunner(name string, q queue.RateLimitingInterface, rec Reconciler, worke
 		gates:      gates,
 		log:        slog.With("component", name),
 	}
+}
+
+// SetMetrics attaches reconcile instrumentation. controller is the low-
+// cardinality label value (e.g. "daemon", "gc").
+func (r *Runner) SetMetrics(m reconcileMetrics, controller string) {
+	r.metrics = m
+	r.metricsControl = controller
 }
 
 // Run blocks until ctx ends and every worker has exited (the queue drains
@@ -152,6 +166,7 @@ func (r *Runner) processNextItem(ctx context.Context) bool {
 // and the worker lives on. Everything outside this call - the worker loop,
 // the queue, the informers - stays unguarded on purpose.
 func (r *Runner) reconcileGuarded(ctx context.Context, key string) (err error) {
+	start := time.Now()
 	defer func() {
 		if p := recover(); p != nil {
 			r.log.Error("reconcile panicked",
@@ -159,6 +174,18 @@ func (r *Runner) reconcileGuarded(ctx context.Context, key string) (err error) {
 				"error", fmt.Sprintf("panic: %v", p),
 				"stack", string(debug.Stack()))
 			err = fmt.Errorf("reconcile panicked: %v", p)
+		}
+		if r.metrics != nil {
+			failed := err != nil
+			var requeue RequeueAfter
+			if errors.As(err, &requeue) {
+				failed = false
+			}
+			ctrl := r.metricsControl
+			if ctrl == "" {
+				ctrl = r.name
+			}
+			r.metrics.ObserveReconcile(ctrl, time.Since(start), failed)
 		}
 	}()
 	return r.reconciler.Reconcile(ctx, key)

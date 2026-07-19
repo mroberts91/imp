@@ -14,12 +14,20 @@ Type=simple
 User=imp
 Group=imp
 
+# --- Cgroup delegation (M3) -----------------------------------------------
+# Delegate=yes makes this unit's cgroup writable by User=imp so impd can
+# create per-Proc children, apply memory/cpu/pids limits, and re-attach
+# across restarts (D1). Without it, pass an explicit --cgroup-root.
+# Prefer auto-detect (omit --cgroup-root): impd uses /proc/self/cgroup.
+Delegate=yes
+
 # --- Invocation -------------------------------------------------------------
 # impd is configured by flags only (it reads no environment variables). These
 # are its built-in defaults, spelled out so the unit is self-documenting; to
 # relocate a path, edit here (or in a drop-in) - and keep the directories'
 # ownership in step (see bootstrap/lib/common.sh ensure_dirs).
 # impd logs JSON to stderr; read it with: journalctl -u imp
+# Metrics listen on 127.0.0.1:9090 by default (--metrics-addr= disables).
 ExecStart=/usr/local/bin/impd \
     --socket /run/imp/impd.sock \
     --data-dir /var/lib/imp \
@@ -33,11 +41,12 @@ ExecStart=/usr/local/bin/impd \
 RuntimeDirectory=imp
 RuntimeDirectoryMode=0750
 
-# --- Shutdown: let impd drain its own children ----------------------------
-# KillMode=process means systemd signals ONLY impd, not the whole cgroup, so
-# impd's ordered shutdown gets to terminate each Proc itself (SIGTERM ->
-# per-Proc grace -> SIGKILL). Give it generous time before systemd escalates.
-# (Default KillMode=control-group would instead nuke every Proc immediately.)
+# --- Shutdown -------------------------------------------------------------
+# KillMode=process is load-bearing for D1: systemd signals ONLY impd, not the
+# whole cgroup, so workload cgroups survive an impd restart and can be
+# re-attached. Default impd stop also leaves children alive; operators who
+# want full tear-down use `impctl delete` or pass --kill-procs-on-shutdown.
+# (Default KillMode=control-group would wipe every Proc on unit stop.)
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=90
@@ -52,15 +61,15 @@ OOMScoreAdjust=-500
 # WARNING: impd is a process supervisor. Sandbox options set here are
 # INHERITED by every daemon impd launches, so aggressive confinement here
 # silently confines your workloads too. Keep this conservative; per-Proc
-# isolation is imp's own job (cgroups/namespaces, later milestones), not the
-# unit's. Uncomment stricter options only if you know your Procs tolerate them.
+# isolation is imp's own job (cgroups), not the unit's. Uncomment stricter
+# options only if you know your Procs tolerate them.
 NoNewPrivileges=true
 ProtectHome=true
 ProtectSystem=true
 # ProtectSystem=strict        # would make /etc,/var read-only -> needs ReadWritePaths
 # PrivateTmp=true             # many daemons expect the real /tmp; off by default
 # ProtectKernelTunables=true
-# ProtectControlGroups=true   # do NOT enable once impd manages cgroups itself
+# ProtectControlGroups=true   # do NOT enable — blocks Delegate= / cgroup management
 
 # --- Multi-user supervision hook (DISABLED: this is the single-user build) -
 # To let imp run Procs as OTHER users later, impd must be able to switch

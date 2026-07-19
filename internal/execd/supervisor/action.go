@@ -70,6 +70,23 @@ type RuntimeRecord struct {
 
 	// StartedOnce is true after the first successful Start for this Proc.
 	StartedOnce bool
+
+	// CgroupPath is the absolute path of this Proc's cgroup directory while
+	// managed (empty when none).
+	CgroupPath string
+
+	// Adopted is true when this Running process was re-attached (D1), not
+	// spawned by this supervisor instance.
+	Adopted bool
+
+	// Probe-driven Ready / restart state (M3). HasReadinessProbe is set when
+	// the Proc template configures a readinessProbe; ReadinessOK is the
+	// effective readiness after thresholds. LivenessFailed latches until
+	// the Unhealthy stop path consumes it.
+	HasReadinessProbe bool
+	ReadinessOK       bool
+	ReadinessFailed   bool // failure threshold crossed (not merely initial Failure)
+	LivenessFailed    bool
 }
 
 // computeProcAction decides the next action from desired (exists + policy)
@@ -81,6 +98,9 @@ func computeProcAction(exists bool, policy v1alpha1.RestartPolicy, rt *RuntimeRe
 
 	if rt.Running {
 		if !exists {
+			return Action{Kind: ActionStop}
+		}
+		if rt.LivenessFailed {
 			return Action{Kind: ActionStop}
 		}
 		return Action{Kind: ActionNone}

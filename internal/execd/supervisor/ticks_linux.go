@@ -13,7 +13,7 @@ import (
 )
 
 // readProcStartTicks returns /proc/<pid>/stat field 22 (starttime). Captured
-// at spawn as the D1 re-adoption down-payment; unused in M1 beyond status.
+// at spawn for D1 re-adoption identity checks.
 func readProcStartTicks(pid int) (int64, error) {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {

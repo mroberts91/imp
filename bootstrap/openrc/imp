@@ -5,6 +5,11 @@
 # persistent directories are created by install.sh. This script only supplies
 # the runtime (tmpfs) socket directory and the supervision policy.
 #
+# Cgroup note: systemd installs get Delegate=yes; OpenRC does not. For real
+# memory/cpu/pids limits and D1 re-attach, prepare a writable cgroup v2
+# subtree and set IMP_CGROUP_ROOT (see docs/install.md). Without it, impd
+# will fail to start unless --cgroup-root is passed some other way.
+#
 # impd is configured by flags only (it reads no environment variables); the
 # IMP_* variables below exist so /etc/conf.d/imp can override the flag values
 # and the log destination in one place.
@@ -21,9 +26,15 @@ description="Declarative single-host process orchestrator"
 : "${IMP_RUN_DIR:=/run/imp}"
 : "${IMP_SOCKET:=${IMP_RUN_DIR}/impd.sock}"
 : "${IMP_LOG_FILE:=/var/log/imp/impd.log}"
+# Optional: writable cgroup v2 path (e.g. /sys/fs/cgroup/imp). Required for
+# OpenRC unless auto-detect finds a usable self cgroup (unusual without systemd).
+: "${IMP_CGROUP_ROOT:=}"
 
 command="${IMP_BIN_DIR}/impd"
 command_args="--socket ${IMP_SOCKET} --data-dir ${IMP_DATA_DIR} --manifest-dir ${IMP_MANIFEST_DIR}"
+if [ -n "${IMP_CGROUP_ROOT}" ]; then
+    command_args="${command_args} --cgroup-root ${IMP_CGROUP_ROOT}"
+fi
 
 # Drop privileges to the unprivileged service user (single-user model).
 command_user="${IMP_USER}:${IMP_GROUP}"
@@ -45,9 +56,9 @@ respawn_period=60
 output_log="${IMP_LOG_FILE}"
 error_log="${IMP_LOG_FILE}"
 
-# Shutdown policy: signal only impd and give it up to 90s to drain its Procs
-# itself before OpenRC escalates to SIGKILL. Mirrors systemd's KillMode=process
-# + TimeoutStopSec=90.
+# Shutdown policy: signal only impd and give it up to 90s. Default impd leaves
+# children alive for D1 re-attach (like systemd KillMode=process). For full
+# tear-down, add --kill-procs-on-shutdown to command_args or delete via impctl.
 retry="SIGTERM/90"
 
 depend() {

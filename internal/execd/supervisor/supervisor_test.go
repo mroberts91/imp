@@ -6,8 +6,10 @@
 package supervisor_test
 
 import (
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,19 +20,25 @@ import (
 	"github.com/mroberts91/imp/internal/cache"
 	"github.com/mroberts91/imp/internal/clock"
 	"github.com/mroberts91/imp/internal/etcl"
+	"github.com/mroberts91/imp/internal/execd/cgroups"
 	"github.com/mroberts91/imp/internal/execd/logs"
 	"github.com/mroberts91/imp/internal/execd/supervisor"
 	"github.com/mroberts91/imp/pkg/client"
 )
 
 type harness struct {
-	cl   *client.Client
-	mgr  *supervisor.Manager
-	logs *logs.Store
-	inf  *cache.Informer
+	cl     *client.Client
+	mgr    *supervisor.Manager
+	logs   *logs.Store
+	inf    *cache.Informer
+	cgRoot string
 }
 
 func startHarness(t *testing.T) *harness {
+	return startHarnessOpts(t, true)
+}
+
+func startHarnessOpts(t *testing.T, killOnShutdown bool) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := etcl.Open(filepath.Join(dir, "etcl.db"), nil)
@@ -55,18 +63,27 @@ func startHarness(t *testing.T) *harness {
 	t.Cleanup(func() { hs.Close() })
 
 	cl := client.New(socket)
+	cgRoot := filepath.Join(dir, "cgroup")
+	if err := cgroups.SetupFakeRoot(cgRoot); err != nil {
+		t.Fatalf("SetupFakeRoot: %v", err)
+	}
+	cgMgr, err := cgroups.NewManager(cgRoot)
+	if err != nil {
+		t.Fatalf("cgroups.NewManager: %v", err)
+	}
 	var mgr *supervisor.Manager
 	inf := cache.NewInformer(cl, v1alpha1.KindProc, func(key string) {
 		mgr.Handle(key)
 	}, nil)
-	mgr = supervisor.NewManager(cl, inf.Store(), logStore, clock.Real{})
+	mgr = supervisor.NewManager(cl, inf.Store(), logStore, cgMgr, clock.Real{}, nil, killOnShutdown)
 	go inf.Run(t.Context())
 	if err := inf.WaitForSync(t.Context()); err != nil {
 		t.Fatalf("WaitForSync: %v", err)
 	}
+	mgr.Bootstrap(t.Context())
 	t.Cleanup(mgr.Stop)
 
-	return &harness{cl: cl, mgr: mgr, logs: logStore, inf: inf}
+	return &harness{cl: cl, mgr: mgr, logs: logStore, inf: inf, cgRoot: cgRoot}
 }
 
 func waitPhase(t *testing.T, cl *client.Client, name string, want v1alpha1.ProcPhase) *v1alpha1.Proc {
@@ -115,6 +132,211 @@ func TestSleepReachesRunning(t *testing.T) {
 	if got.Status.State.Running.ProcStartTicks <= 0 {
 		t.Fatalf("procStartTicks = %d, want > 0", got.Status.State.Running.ProcStartTicks)
 	}
+}
+
+func TestReadinessGatesReady(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "ready-probe-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sleep", "60"},
+			RestartPolicy:                 v1alpha1.RestartPolicyAlways,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(2)),
+			ReadinessProbe: &v1alpha1.Probe{
+				Exec: &v1alpha1.ExecAction{
+					Command: []string{"/bin/true"},
+				},
+				InitialDelaySeconds: 0,
+				PeriodSeconds:       1,
+				TimeoutSeconds:      1,
+				SuccessThreshold:    1,
+				FailureThreshold:    3,
+			},
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+
+	// Running but not Ready until readiness succeeds.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := h.cl.GetProc(ctx, "ready-probe-0")
+		if err != nil {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if got.Status.Phase != v1alpha1.ProcPhaseRunning {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		ready := v1alpha1.FindStatusCondition(got.Status.Conditions, v1alpha1.ConditionTypeReady)
+		if ready != nil && ready.Status == v1alpha1.ConditionTrue {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	got, _ := h.cl.GetProc(ctx, "ready-probe-0")
+	t.Fatalf("timed out waiting for Ready=True after readiness; last=%+v", got)
+}
+
+func TestLivenessRestarts(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "live-probe-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sleep", "120"},
+			RestartPolicy:                 v1alpha1.RestartPolicyAlways,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(1)),
+			LivenessProbe: &v1alpha1.Probe{
+				Exec: &v1alpha1.ExecAction{
+					Command: []string{"/bin/false"},
+				},
+				InitialDelaySeconds: 0,
+				PeriodSeconds:       1,
+				TimeoutSeconds:      1,
+				SuccessThreshold:    1,
+				FailureThreshold:    1,
+			},
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	first := waitPhase(t, h.cl, "live-probe-0", v1alpha1.ProcPhaseRunning)
+	firstPID := first.Status.State.Running.PID
+
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := h.cl.GetProc(ctx, "live-probe-0")
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		if got.Status.RestartCount >= 1 {
+			if got.Status.Phase == v1alpha1.ProcPhaseRunning &&
+				got.Status.State.Running != nil &&
+				got.Status.State.Running.PID != firstPID {
+				return
+			}
+			// Restarted into pending/backoff is also success.
+			if got.Status.RestartCount >= 1 {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	got, _ := h.cl.GetProc(ctx, "live-probe-0")
+	t.Fatalf("timed out waiting for liveness restart; last restartCount=%d phase=%s",
+		got.Status.RestartCount, got.Status.Phase)
+}
+
+func TestSpawnAppliesCgroupLimits(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "limited-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sleep", "60"},
+			RestartPolicy:                 v1alpha1.RestartPolicyAlways,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(2)),
+			Resources: v1alpha1.ResourceRequirements{
+				Limits: v1alpha1.ResourceLimits{
+					Memory:    "32Mi",
+					CPUWeight: new(int64(50)),
+					Pids:      new(int64(16)),
+				},
+			},
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	got := waitPhase(t, h.cl, "limited-0", v1alpha1.ProcPhaseRunning)
+	if got.Metadata.UID == "" {
+		t.Fatal("expected UID assigned")
+	}
+	cgPath := filepath.Join(h.cgRoot, "proc-"+got.Metadata.UID)
+	assertFileContains(t, filepath.Join(cgPath, "memory.max"), "33554432")
+	assertFileContains(t, filepath.Join(cgPath, "cpu.weight"), "50")
+	assertFileContains(t, filepath.Join(cgPath, "pids.max"), "16")
+}
+
+func assertFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("%s = %q, want containing %q", path, data, want)
+	}
+}
+
+func TestAdoptAcrossDetach(t *testing.T) {
+	h := startHarnessOpts(t, false) // leave children on Stop
+	ctx := t.Context()
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "keep-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sleep", "120"},
+			RestartPolicy:                 v1alpha1.RestartPolicyAlways,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(2)),
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	got := waitPhase(t, h.cl, "keep-0", v1alpha1.ProcPhaseRunning)
+	pid := got.Status.State.Running.PID
+	uid := got.Metadata.UID
+	if uid == "" || pid <= 0 {
+		t.Fatalf("uid=%q pid=%d", uid, pid)
+	}
+
+	// Detach supervisor; child must keep running.
+	h.mgr.Stop()
+	if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); err != nil {
+		t.Fatalf("child died after detach: %v", err)
+	}
+
+	cgMgr, err := cgroups.NewManager(h.cgRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mgr2 *supervisor.Manager
+	inf2 := cache.NewInformer(h.cl, v1alpha1.KindProc, func(key string) {
+		mgr2.Handle(key)
+	}, nil)
+	mgr2 = supervisor.NewManager(h.cl, inf2.Store(), h.logs, cgMgr, clock.Real{}, nil, true)
+	go inf2.Run(ctx)
+	if err := inf2.WaitForSync(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mgr2.Bootstrap(ctx)
+	t.Cleanup(mgr2.Stop)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		cur, err := h.cl.GetProc(ctx, "keep-0")
+		if err == nil && cur.Status.Phase == v1alpha1.ProcPhaseRunning &&
+			cur.Status.State.Running != nil && cur.Status.State.Running.PID == pid {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cur, _ := h.cl.GetProc(ctx, "keep-0")
+	t.Fatalf("adopt did not restore Running pid=%d; got %+v", pid, cur)
 }
 
 func TestCrashLoopBackOff(t *testing.T) {

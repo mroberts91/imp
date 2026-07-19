@@ -24,12 +24,16 @@ import (
 	"github.com/mroberts91/imp/internal/clock"
 	"github.com/mroberts91/imp/internal/controllers"
 	"github.com/mroberts91/imp/internal/controllers/daemon"
+	"github.com/mroberts91/imp/internal/controllers/eventttl"
 	"github.com/mroberts91/imp/internal/controllers/gc"
 	"github.com/mroberts91/imp/internal/etcl"
+	"github.com/mroberts91/imp/internal/execd/cgroups"
 	"github.com/mroberts91/imp/internal/execd/logs"
 	"github.com/mroberts91/imp/internal/execd/supervisor"
 	"github.com/mroberts91/imp/internal/manifest"
+	"github.com/mroberts91/imp/internal/metrics"
 	"github.com/mroberts91/imp/internal/queue"
+	"github.com/mroberts91/imp/internal/recorder"
 	"github.com/mroberts91/imp/pkg/client"
 )
 
@@ -42,26 +46,38 @@ var (
 
 func main() {
 	var (
-		socketPath  = flag.String("socket", "/run/imp/impd.sock", "path of the API's unix domain socket")
-		dataDir     = flag.String("data-dir", "/var/lib/imp", "state directory (object store, process logs)")
-		manifestDir = flag.String("manifest-dir", "/etc/imp/manifests", "directory of declarative YAML manifests")
-		logLevel    = flag.String("log-level", "info", "log level: debug, info, warn, or error")
+		socketPath          = flag.String("socket", "/run/imp/impd.sock", "path of the API's unix domain socket")
+		dataDir             = flag.String("data-dir", "/var/lib/imp", "state directory (object store, process logs)")
+		manifestDir         = flag.String("manifest-dir", "/etc/imp/manifests", "directory of declarative YAML manifests")
+		logLevel            = flag.String("log-level", "info", "log level: debug, info, warn, or error")
+		eventTTL            = flag.Duration("event-ttl", eventttl.DefaultRetention, "how long to retain Events before pruning (D3)")
+		cgroupRoot          = flag.String("cgroup-root", "", "writable cgroup v2 subtree (empty: auto-detect systemd Delegate= / self cgroup)")
+		killProcsOnShutdown = flag.Bool("kill-procs-on-shutdown", false, "terminate Procs and remove cgroups on impd stop (default: leave them for D1 re-attach)")
+		metricsAddr         = flag.String("metrics-addr", "127.0.0.1:9090", "Prometheus metrics listen address (empty disables)")
 	)
 	flag.Parse()
 
-	if err := run(*socketPath, *dataDir, *manifestDir, *logLevel); err != nil {
+	if err := run(*socketPath, *dataDir, *manifestDir, *logLevel, *eventTTL, *cgroupRoot, *killProcsOnShutdown, *metricsAddr); err != nil {
 		slog.Error("impd exiting", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(socketPath, dataDir, manifestDir, logLevel string) error {
+func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Duration, cgroupRootFlag string, killProcsOnShutdown bool, metricsAddr string) error {
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(logLevel)); err != nil {
 		return fmt.Errorf("invalid --log-level %q: %w", logLevel, err)
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 
+	cgroupRoot, err := cgroups.ResolveRoot(cgroupRootFlag)
+	if err != nil {
+		return err
+	}
+	cgMgr, err := cgroups.NewManager(cgroupRoot)
+	if err != nil {
+		return fmt.Errorf("cgroup root %q: %w", cgroupRoot, err)
+	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data directory: %w", err)
 	}
@@ -95,16 +111,21 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 		}
 	}()
 
+	ctlClient := client.New(socketPath)
+	clk := clock.Real{}
+	met := metrics.New()
+	manifestRec := recorder.New(ctlClient, "manifest", clk)
+	daemonRec := recorder.New(ctlClient, daemon.ReportingComponent, clk)
+	execRec := recorder.New(ctlClient, "execd", clk)
+
 	watcherDone := make(chan struct{})
 	go func() {
 		defer close(watcherDone)
-		watcher := manifest.NewWatcher(client.New(socketPath), manifestDir, nil)
+		watcher := manifest.NewWatcher(client.New(socketPath), manifestDir, nil, manifestRec)
 		if err := watcher.Run(ctx); err != nil {
 			slog.Error("manifest watcher failed", "component", "manifest", "error", err)
 		}
 	}()
-
-	ctlClient := client.New(socketPath)
 
 	dcQueue := queue.NewRateLimiting(queue.DefaultRateLimiter())
 	dcDaemonInf := cache.NewInformer(ctlClient, v1alpha1.KindDaemon, func(key string) { dcQueue.Add(key) }, nil)
@@ -112,13 +133,17 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 	dcProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) { dcEnqueueOwner(key) }, nil)
 	dcEnqueueOwner = controllers.EnqueueOwner(dcProcInf.Store(), v1alpha1.KindDaemon, dcQueue)
 	dcRunner := controllers.NewRunner("daemon-controller", dcQueue,
-		daemon.New(ctlClient, dcDaemonInf.Store(), dcProcInf.Store(), nil), 1, dcDaemonInf, dcProcInf)
+		daemon.New(ctlClient, dcDaemonInf.Store(), dcProcInf.Store(), clk, daemonRec), 1, dcDaemonInf, dcProcInf)
+	dcRunner.SetMetrics(met, metrics.ControllerDaemon)
 
 	gcQueue := queue.NewRateLimiting(queue.DefaultRateLimiter())
 	gcProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) { gcQueue.Add(key) }, nil)
 	gcDaemonInf := cache.NewInformer(ctlClient, v1alpha1.KindDaemon, gc.EnqueueOwnedProcs(gcProcInf.Store(), gcQueue), nil)
 	gcRunner := controllers.NewRunner("gc", gcQueue,
 		gc.New(ctlClient, gcDaemonInf.Store(), gcProcInf.Store()), 1, gcDaemonInf, gcProcInf)
+	gcRunner.SetMetrics(met, metrics.ControllerGC)
+
+	ttlCtl := eventttl.New(ctlClient, eventTTL, clk)
 
 	// execd supervisor: handlers never fire before Run, so assigning the
 	// manager after NewInformer (same pattern as dcEnqueueOwner) is safe.
@@ -126,13 +151,32 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 	execInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) {
 		execMgr.Handle(key)
 	}, nil)
-	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, clock.Real{})
+	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, cgMgr, clk, execRec, killProcsOnShutdown)
+	execMgr.SetMetrics(met)
+
+	metricsBound, metricsShutdown, err := metrics.ListenAndServe(metricsAddr, met)
+	if err != nil {
+		store.Close()
+		return err
+	}
+
+	scraperDone := make(chan struct{})
+	go func() {
+		defer close(scraperDone)
+		metrics.NewScraper(met, cgMgr, execMgr, clk, 0).Run(ctx)
+	}()
 
 	go dcDaemonInf.Run(ctx)
 	go dcProcInf.Run(ctx)
 	go gcDaemonInf.Run(ctx)
 	go gcProcInf.Run(ctx)
 	go execInf.Run(ctx)
+
+	if err := execInf.WaitForSync(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		store.Close()
+		return fmt.Errorf("execd informer sync: %w", err)
+	}
+	execMgr.Bootstrap(ctx)
 
 	daemonDone := make(chan struct{})
 	go func() {
@@ -148,10 +192,21 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 			slog.Error("gc controller failed", "component", "gc", "error", err)
 		}
 	}()
+	ttlDone := make(chan struct{})
+	go func() {
+		defer close(ttlDone)
+		if err := ttlCtl.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("eventttl failed", "component", "eventttl", "error", err)
+		}
+	}()
 
 	slog.Info("impd started",
 		"version", version, "commit", commit,
-		"socket", socketPath, "dataDir", dataDir, "manifestDir", manifestDir)
+		"socket", socketPath, "dataDir", dataDir, "manifestDir", manifestDir,
+		"cgroupRoot", cgroupRoot,
+		"killProcsOnShutdown", killProcsOnShutdown,
+		"metricsAddr", metricsBound,
+		"eventTTL", eventTTL.String())
 
 	select {
 	case <-ctx.Done():
@@ -161,7 +216,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 		return fmt.Errorf("api-server: %w", err)
 	}
 
-	// Ordered shutdown: manifest → controllers → execd → store → HTTP.
+	// Ordered shutdown: manifest → controllers (daemon, gc, eventttl) → execd → metrics → store → HTTP.
 	select {
 	case <-watcherDone:
 	case <-time.After(5 * time.Second):
@@ -177,6 +232,11 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 	case <-time.After(5 * time.Second):
 		slog.Warn("gc controller did not stop in time")
 	}
+	select {
+	case <-ttlDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("eventttl did not stop in time")
+	}
 	slog.Info("controllers stopped")
 
 	execDone := make(chan struct{})
@@ -190,6 +250,17 @@ func run(socketPath, dataDir, manifestDir, logLevel string) error {
 		slog.Warn("execd did not stop in time")
 	}
 	slog.Info("execd stopped")
+
+	select {
+	case <-scraperDone:
+	case <-time.After(2 * time.Second):
+		slog.Warn("metrics scraper did not stop in time")
+	}
+	mctx, mcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer mcancel()
+	if err := metricsShutdown(mctx); err != nil {
+		slog.Warn("metrics shutdown incomplete", "error", err)
+	}
 
 	storeErr := store.Close()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

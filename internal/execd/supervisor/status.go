@@ -3,7 +3,11 @@
 
 package supervisor
 
-import "github.com/mroberts91/imp/api/v1alpha1"
+import (
+	"time"
+
+	"github.com/mroberts91/imp/api/v1alpha1"
+)
 
 const componentName = "execd"
 
@@ -61,4 +65,53 @@ func shouldRestart(policy v1alpha1.RestartPolicy, exit *ExitInfo) bool {
 		return policy == v1alpha1.RestartPolicyAlways
 	}
 	return policy != v1alpha1.RestartPolicyNever
+}
+
+// readyCondition projects Ready from phase and optional readiness-probe state.
+// Without a readinessProbe, M2 behavior: Running ⇒ Ready=True.
+func readyCondition(phase v1alpha1.ProcPhase, state v1alpha1.ProcState, gen int64, now time.Time, rt *RuntimeRecord) v1alpha1.Condition {
+	cond := v1alpha1.Condition{
+		Type:               v1alpha1.ConditionTypeReady,
+		Status:             v1alpha1.ConditionFalse,
+		ObservedGeneration: gen,
+		LastTransitionTime: v1alpha1.NewTime(now),
+		Reason:             "NotReady",
+		Message:            "proc is not running",
+	}
+	if phase == v1alpha1.ProcPhaseRunning {
+		if rt != nil && rt.HasReadinessProbe {
+			if rt.ReadinessOK {
+				cond.Status = v1alpha1.ConditionTrue
+				cond.Reason = "Running"
+				cond.Message = "readiness probe succeeded"
+				return cond
+			}
+			if rt.ReadinessFailed {
+				cond.Reason = v1alpha1.ReadyReasonProbeFailed
+				cond.Message = "readiness probe failed"
+				return cond
+			}
+			cond.Reason = v1alpha1.ReadyReasonProbePending
+			cond.Message = "waiting for readiness probe"
+			return cond
+		}
+		cond.Status = v1alpha1.ConditionTrue
+		cond.Reason = "Running"
+		cond.Message = "proc is running"
+		return cond
+	}
+	if state.Waiting != nil && state.Waiting.Reason == v1alpha1.WaitingReasonCrashLoopBackOff {
+		cond.Reason = v1alpha1.WaitingReasonCrashLoopBackOff
+		cond.Message = state.Waiting.Message
+		return cond
+	}
+	switch phase {
+	case v1alpha1.ProcPhaseSucceeded:
+		cond.Reason = "ProcCompleted"
+		cond.Message = "proc completed successfully"
+	case v1alpha1.ProcPhaseFailed:
+		cond.Reason = "ProcFailed"
+		cond.Message = "proc failed"
+	}
+	return cond
 }

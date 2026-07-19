@@ -149,6 +149,20 @@ tasks:
       - bash scripts/m1-acceptance.sh
     platforms: [linux]
 
+  accept:m2:
+    desc: Rootless M2 acceptance (crash-loop → describe/events/get -w → SIGTERM)
+    deps: [build]
+    cmds:
+      - bash scripts/m2-acceptance.sh
+    platforms: [linux]
+
+  accept:m3:
+    desc: Rootless M3 acceptance (limits+readiness, liveness, metrics, D1 adopt, kill-on-shutdown)
+    deps: [build]
+    cmds:
+      - bash scripts/m3-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

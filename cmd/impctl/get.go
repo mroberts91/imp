@@ -4,9 +4,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
@@ -17,6 +19,7 @@ import (
 
 func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	var output string
+	var watch bool
 	cmd := &cobra.Command{
 		Use:   "get (daemons|procs|events) [NAME]",
 		Short: "Display one or many objects",
@@ -28,6 +31,17 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 			}
 			c := newClient()
 			ctx := cmd.Context()
+			out := cmd.OutOrStdout()
+
+			if watch {
+				if output != "" {
+					return fmt.Errorf("cannot use --watch with -o")
+				}
+				if len(args) == 2 {
+					return fmt.Errorf("get -w watches a kind, not a single named object")
+				}
+				return watchKind(ctx, c, out, kind)
+			}
 
 			var items []json.RawMessage
 			if len(args) == 2 {
@@ -46,16 +60,96 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 
 			switch output {
 			case "":
-				return printTable(cmd.OutOrStdout(), kind, items)
+				return printTable(out, kind, items)
 			case "json", "yaml":
-				return printSerialized(cmd.OutOrStdout(), output, items)
+				return printSerialized(out, output, items)
 			default:
 				return fmt.Errorf("unknown output format %q (use json or yaml)", output)
 			}
 		},
 	}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: json or yaml (default is a table)")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "watch for changes after listing")
 	return cmd
+}
+
+func watchKind(ctx context.Context, c *client.Client, w io.Writer, kind string) error {
+	list, err := c.ListRaw(ctx, kind)
+	if err != nil {
+		return err
+	}
+	if err := printTable(w, kind, list.Items); err != nil {
+		return err
+	}
+
+	events, cancel, err := c.Watch(ctx, kind, list.ResourceVersion)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case ev, ok := <-events:
+			if !ok {
+				return fmt.Errorf("watch closed; relist and retry")
+			}
+			if ev.Type == v1alpha1.WatchError {
+				return fmt.Errorf("watch error (compacted or overflow); relist and retry")
+			}
+			if err := printWatchRow(w, kind, string(ev.Type), ev.Object); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func printWatchRow(w io.Writer, kind, eventType string, raw json.RawMessage) error {
+	switch kind {
+	case v1alpha1.KindDaemon:
+		var d v1alpha1.Daemon
+		if err := json.Unmarshal(raw, &d); err != nil {
+			return err
+		}
+		desired := int32(0)
+		if d.Spec.Replicas != nil {
+			desired = *d.Spec.Replicas
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d/%d\t%d\t%s\n",
+			eventType, d.Metadata.Name,
+			d.Status.ReadyReplicas, desired,
+			d.Status.UpdatedReplicas,
+			age(d.Metadata.CreationTimestamp))
+	case v1alpha1.KindProc:
+		var p v1alpha1.Proc
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return err
+		}
+		pid := "-"
+		if p.Status.State.Running != nil {
+			pid = fmt.Sprint(p.Status.State.Running.PID)
+		}
+		phase := string(p.Status.Phase)
+		if phase == "" {
+			phase = string(v1alpha1.ProcPhasePending)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+			eventType, p.Metadata.Name,
+			p.Metadata.Labels[v1alpha1.LabelDaemonName],
+			phase, p.Status.RestartCount, pid,
+			age(p.Metadata.CreationTimestamp))
+	case v1alpha1.KindEvent:
+		var e v1alpha1.Event
+		if err := json.Unmarshal(raw, &e); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s/%s\t%s\n",
+			eventType, age(e.LastTimestamp), e.Type, e.Reason,
+			strings.ToLower(e.Regarding.Kind), e.Regarding.Name, e.Message)
+	}
+	return nil
 }
 
 func printSerialized(w io.Writer, format string, items []json.RawMessage) error {

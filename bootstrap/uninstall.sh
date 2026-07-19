@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Michael Robertson 2026
+# SPDX-License-Identifier: Apache-2.0
+
 # uninstall.sh - remove an imp system install (systemd or openrc).
 #
 #   sudo ./uninstall.sh systemd [--purge]

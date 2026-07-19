@@ -8,38 +8,49 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"os/exec"
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/cache"
 	"github.com/mroberts91/imp/internal/clock"
+	"github.com/mroberts91/imp/internal/execd/probes"
+	"github.com/mroberts91/imp/internal/metrics"
+	"github.com/mroberts91/imp/internal/recorder"
 	"github.com/mroberts91/imp/pkg/client"
 )
 
 type worker struct {
-	m      *Manager
-	key    string
-	name   string
-	client *client.Client
-	store  *cache.Store
-	logs   LogCapture
-	clock  clock.Clock
-	log    *slog.Logger
+	m        *Manager
+	key      string
+	name     string
+	client   *client.Client
+	store    *cache.Store
+	logs     LogCapture
+	clock    clock.Clock
+	recorder *recorder.Recorder
+	log      *slog.Logger
 
 	wakeCh   chan struct{}
 	stopCh   chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
 
-	rt     RuntimeRecord
-	cmd    *exec.Cmd
-	exitCh chan exitResult
+	// detach is set when Manager.Stop leaves children alive (D1 default).
+	detach atomic.Bool
+
+	rt             RuntimeRecord
+	cmd            *exec.Cmd
+	exitCh         chan exitResult
+	probeCh        chan probes.ResultEvent
+	adoptWatchStop chan struct{}
 }
 
 func newWorker(m *Manager, key string) *worker {
@@ -48,17 +59,19 @@ func newWorker(m *Manager, key string) *worker {
 		name = parts[1]
 	}
 	return &worker{
-		m:      m,
-		key:    key,
-		name:   name,
-		client: m.client,
-		store:  m.store,
-		logs:   m.logs,
-		clock:  m.clock,
-		log:    m.log.With("key", key),
-		wakeCh: make(chan struct{}, 1),
-		stopCh: make(chan struct{}),
-		done:   make(chan struct{}),
+		m:        m,
+		key:      key,
+		name:     name,
+		client:   m.client,
+		store:    m.store,
+		logs:     m.logs,
+		clock:    m.clock,
+		recorder: m.recorder,
+		log:      m.log.With("key", key),
+		wakeCh:   make(chan struct{}, 1),
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+		probeCh:  make(chan probes.ResultEvent, 16),
 	}
 }
 
@@ -74,10 +87,25 @@ func (w *worker) requestStop() {
 	w.wake()
 }
 
+// requestDetach shuts the worker down without stopping the child process.
+func (w *worker) requestDetach() {
+	w.stopOnce.Do(func() {
+		w.detach.Store(true)
+		close(w.stopCh)
+	})
+	w.wake()
+}
+
 func (w *worker) run() {
 	defer close(w.done)
 	defer w.m.removeWorker(w.key)
-	defer func() { _ = w.logs.Remove(w.name) }()
+	defer func() {
+		w.stopProbes()
+		w.stopAdoptWatch()
+		if !w.detach.Load() {
+			_ = w.logs.Remove(w.name)
+		}
+	}()
 
 	for {
 		w.syncOnce()
@@ -88,6 +116,9 @@ func (w *worker) run() {
 		case <-w.stopCh:
 			stopping = true
 		default:
+		}
+		if w.detach.Load() {
+			return
 		}
 		if (!exists || stopping) && !w.rt.Running {
 			return
@@ -104,6 +135,8 @@ func (w *worker) run() {
 		select {
 		case <-w.wakeCh:
 		case <-w.stopCh:
+		case ev := <-w.probeCh:
+			w.applyProbe(ev)
 		case res, ok := <-w.exitChOrNil():
 			if ok {
 				w.onExit(res)
@@ -157,6 +190,9 @@ func (w *worker) syncOnce() {
 
 	select {
 	case <-w.stopCh:
+		if w.detach.Load() {
+			return
+		}
 		exists = false
 	default:
 	}
@@ -196,6 +232,18 @@ func (w *worker) syncOnce() {
 }
 
 func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
+	if p.Metadata.UID == "" {
+		return fmt.Errorf("proc %s: empty UID (needed for cgroup path)", p.Metadata.Name)
+	}
+
+	cgPath, err := w.m.cgroups.Ensure(p.Metadata.UID)
+	if err != nil {
+		return fmt.Errorf("cgroup ensure: %w", err)
+	}
+	if err := w.m.cgroups.ApplyLimits(cgPath, p.Spec.Resources.Limits); err != nil {
+		return fmt.Errorf("cgroup limits: %w", err)
+	}
+
 	stdout, stderr, err := w.logs.Open(p.Metadata.Name)
 	if err != nil {
 		return err
@@ -212,12 +260,22 @@ func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
 	}
 
 	pid := cmd.Process.Pid
+	if err := w.m.cgroups.Add(cgPath, pid); err != nil {
+		w.log.Warn("cgroup add failed; killing started process", "pid", pid, "error", err)
+		_ = killGroup(pid, unix.SIGKILL)
+		w.logs.CloseCapture(p.Metadata.Name)
+		_, _ = cmd.Process.Wait()
+		return fmt.Errorf("cgroup add: %w", err)
+	}
+
 	ticks, tErr := readProcStartTicks(pid)
 	if tErr != nil {
 		w.log.Warn("reading procStartTicks", "pid", pid, "error", tErr)
 	}
 	started := w.clock.Now()
 	noteStart(&w.rt, pid, ticks, started)
+	w.rt.CgroupPath = cgPath
+	w.rt.Adopted = false
 	w.cmd = cmd
 	w.exitCh = make(chan exitResult, 1)
 	go func(c *exec.Cmd, ch chan exitResult) {
@@ -227,11 +285,18 @@ func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
 
 	w.emit(ctx, p, v1alpha1.EventTypeNormal, v1alpha1.ReasonStarted,
 		fmt.Sprintf("Started proc %s pid=%d", p.Metadata.Name, pid))
+	w.publishCgroupSnap(p)
+	w.startProbes(p)
 	return w.projectStatus(ctx, p, p.Spec.RestartPolicy)
 }
 
 func (w *worker) doStop(ctx context.Context, p *v1alpha1.Proc) {
-	if !w.rt.Running || w.cmd == nil || w.exitCh == nil {
+	w.stopProbes()
+	w.rt.LivenessFailed = false
+	w.clearCgroupSnap()
+	cgPath := w.rt.CgroupPath
+	if !w.rt.Running {
+		w.cleanupCgroup(cgPath)
 		return
 	}
 	sig := v1alpha1.DefaultStopSignal
@@ -242,25 +307,71 @@ func (w *worker) doStop(ctx context.Context, p *v1alpha1.Proc) {
 		w.emit(ctx, p, v1alpha1.EventTypeNormal, v1alpha1.ReasonKilling,
 			fmt.Sprintf("Stopping proc %s", p.Metadata.Name))
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), time.Duration(grace+5)*time.Second)
-	defer cancel()
-	res := stopProcess(stopCtx, w.clock, w.cmd, sig, grace, w.exitCh, w.log)
-	if res.state != nil || res.err != nil {
-		w.onExit(res)
-	} else if w.rt.Running {
-		// Forced clear if Wait never delivered (ctx canceled).
-		finished := w.clock.Now()
-		noteExit(&w.rt, ExitInfo{Nonzero: true, Signal: "KILL", FinishedAt: finished}, finished.Sub(w.rt.StartedAt))
-		w.cmd = nil
-		w.exitCh = nil
-		w.logs.CloseCapture(w.name)
+
+	if w.cmd != nil && w.exitCh != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), time.Duration(grace+5)*time.Second)
+		defer cancel()
+		res := stopProcess(stopCtx, w.clock, w.cmd, sig, grace, w.exitCh, w.log)
+		if res.state != nil || res.err != nil {
+			w.onExit(res)
+		} else if w.rt.Running {
+			finished := w.clock.Now()
+			noteExit(&w.rt, ExitInfo{Nonzero: true, Signal: "KILL", FinishedAt: finished}, finished.Sub(w.rt.StartedAt))
+			w.cmd = nil
+			w.exitCh = nil
+			w.logs.CloseCapture(w.name)
+		}
+	} else {
+		// Adopted process: signal the pgid/pid, then rely on cgroup Kill.
+		if w.rt.PID > 0 {
+			_ = killGroup(w.rt.PID, mustSignal(sig))
+		}
+		w.stopAdoptWatch()
+		if w.rt.Running {
+			finished := w.clock.Now()
+			noteExit(&w.rt, ExitInfo{Nonzero: true, Signal: "KILL", FinishedAt: finished}, finished.Sub(w.rt.StartedAt))
+			w.exitCh = nil
+			w.logs.CloseCapture(w.name)
+		}
 	}
+
+	if cgPath != "" {
+		if err := w.m.cgroups.Kill(cgPath); err != nil {
+			w.log.Warn("cgroup kill failed", "cgroup", cgPath, "error", err)
+		}
+	}
+	w.cleanupCgroup(cgPath)
+
 	if p != nil {
 		_ = w.projectStatus(ctx, p, p.Spec.RestartPolicy)
 	}
 }
 
+func mustSignal(name string) unix.Signal {
+	sig, err := parseSignal(name)
+	if err != nil {
+		return unix.SIGTERM
+	}
+	return sig
+}
+
+func (w *worker) cleanupCgroup(path string) {
+	if path == "" {
+		path = w.rt.CgroupPath
+	}
+	if path == "" {
+		return
+	}
+	if err := w.m.cgroups.Remove(path); err != nil {
+		w.log.Warn("cgroup remove failed", "cgroup", path, "error", err)
+	}
+	w.rt.CgroupPath = ""
+}
+
 func (w *worker) onExit(res exitResult) {
+	w.stopProbes()
+	w.stopAdoptWatch()
+	w.clearCgroupSnap()
 	finished := w.clock.Now()
 	info := dissectExit(res.err, res.state, finished)
 	healthy := time.Duration(0)
@@ -268,6 +379,11 @@ func (w *worker) onExit(res exitResult) {
 		healthy = finished.Sub(w.rt.StartedAt)
 	}
 	noteExit(&w.rt, info, healthy)
+	w.rt.Adopted = false
+	w.rt.LivenessFailed = false
+	w.rt.HasReadinessProbe = false
+	w.rt.ReadinessOK = false
+	w.rt.ReadinessFailed = false
 	w.cmd = nil
 	w.exitCh = nil
 	w.logs.CloseCapture(w.name)
@@ -285,12 +401,97 @@ func (w *worker) onExit(res exitResult) {
 	_ = w.projectStatus(ctx, &p, p.Spec.RestartPolicy)
 }
 
+func (w *worker) startProbes(p *v1alpha1.Proc) {
+	w.stopProbes()
+	w.rt.HasReadinessProbe = p.Spec.ReadinessProbe != nil
+	w.rt.ReadinessOK = false
+	w.rt.ReadinessFailed = false
+	w.rt.LivenessFailed = false
+	if p.Spec.LivenessProbe == nil && p.Spec.ReadinessProbe == nil {
+		return
+	}
+	w.m.probes.Start(w.key, w.rt.CgroupPath, w.rt.StartedAt, p.Spec.LivenessProbe, p.Spec.ReadinessProbe)
+}
+
+func (w *worker) publishCgroupSnap(p *v1alpha1.Proc) {
+	daemon := ""
+	if p != nil {
+		daemon = p.Metadata.Labels[v1alpha1.LabelDaemonName]
+	}
+	w.m.setCgroupSnap(w.key, metrics.ProcCgroup{
+		Proc:   w.name,
+		Daemon: daemon,
+		Path:   w.rt.CgroupPath,
+	})
+}
+
+func (w *worker) clearCgroupSnap() {
+	w.m.clearCgroupSnap(w.key)
+}
+
+func (w *worker) stopProbes() {
+	w.m.probes.Stop(w.key)
+}
+
+func (w *worker) applyProbe(ev probes.ResultEvent) {
+	ctx := context.Background()
+	raw, ok := w.store.GetByKey(w.key)
+	var p *v1alpha1.Proc
+	if ok {
+		var obj v1alpha1.Proc
+		if err := json.Unmarshal(raw, &obj); err == nil {
+			p = &obj
+		}
+	}
+
+	switch ev.ProbeType {
+	case probes.ProbeReadiness:
+		if ev.Result == probes.ResultSuccess {
+			w.rt.ReadinessOK = true
+			w.rt.ReadinessFailed = false
+		} else {
+			w.rt.ReadinessOK = false
+			if ev.Message != "initial probe state" {
+				w.rt.ReadinessFailed = true
+				if p != nil {
+					w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonProbeFailed,
+						fmt.Sprintf("Readiness probe failed: %s", ev.Message))
+				}
+			}
+		}
+	case probes.ProbeLiveness:
+		if ev.Result == probes.ResultFailure {
+			w.rt.LivenessFailed = true
+			if p != nil {
+				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonProbeFailed,
+					fmt.Sprintf("Liveness probe failed: %s", ev.Message))
+				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonUnhealthy,
+					"Liveness probe failed; killing and restarting")
+			}
+		}
+	}
+
+	if w.m.metrics != nil && ev.Message != "initial probe state" {
+		w.m.metrics.IncProbeResult(w.name, string(ev.ProbeType), string(ev.Result))
+	}
+
+	if p != nil {
+		_ = w.projectStatus(ctx, p, p.Spec.RestartPolicy)
+	}
+}
+
 func (w *worker) projectStatus(ctx context.Context, p *v1alpha1.Proc, policy v1alpha1.RestartPolicy) error {
 	if policy == "" {
 		policy = p.Spec.RestartPolicy
 	}
 	phase, state := statusFromRuntime(&w.rt, policy)
+	ready := readyCondition(phase, state, p.Metadata.Generation, w.clock.Now(), &w.rt)
 	rc := w.rt.RestartCount
+	daemon := p.Metadata.Labels[v1alpha1.LabelDaemonName]
+	if w.m.metrics != nil {
+		w.m.metrics.SetProcPhase(p.Metadata.Name, daemon, string(phase))
+		w.m.metrics.ObserveRestarts(p.Metadata.Name, daemon, rc)
+	}
 	err := client.RetryOnConflict(func() error {
 		fresh, err := w.client.GetProc(ctx, p.Metadata.Name)
 		if err != nil {
@@ -299,6 +500,7 @@ func (w *worker) projectStatus(ctx context.Context, p *v1alpha1.Proc, policy v1a
 		fresh.Status.Phase = phase
 		fresh.Status.State = state
 		fresh.Status.RestartCount = rc
+		v1alpha1.SetStatusCondition(&fresh.Status.Conditions, ready)
 		_, err = w.client.UpdateProcStatus(ctx, fresh)
 		return err
 	})
@@ -312,27 +514,9 @@ func (w *worker) projectStatus(ctx context.Context, p *v1alpha1.Proc, policy v1a
 }
 
 func (w *worker) emit(ctx context.Context, p *v1alpha1.Proc, typ v1alpha1.EventType, reason, message string) {
-	now := v1alpha1.NewTime(w.clock.Now())
-	h := fnv.New32a()
-	fmt.Fprintf(h, "%s|%s", reason, message)
-	ev := &v1alpha1.Event{
-		Metadata: v1alpha1.ObjectMeta{
-			Name: fmt.Sprintf("%s.%08x", p.Metadata.Name, h.Sum32()),
-		},
-		Regarding: v1alpha1.ObjectRef{
-			Kind: v1alpha1.KindProc,
-			Name: p.Metadata.Name,
-			UID:  p.Metadata.UID,
-		},
-		Type:               typ,
-		Reason:             reason,
-		Message:            message,
-		Count:              1,
-		FirstTimestamp:     now,
-		LastTimestamp:      now,
-		ReportingComponent: componentName,
-	}
-	if _, err := w.client.ApplyEvent(ctx, ev); err != nil {
-		w.log.Warn("dropping event", "reason", reason, "error", err)
-	}
+	w.recorder.Eventf(ctx, v1alpha1.ObjectRef{
+		Kind: v1alpha1.KindProc,
+		Name: p.Metadata.Name,
+		UID:  p.Metadata.UID,
+	}, typ, reason, "%s", message)
 }

@@ -146,7 +146,114 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 	if s.TerminationGracePeriodSeconds != nil && *s.TerminationGracePeriodSeconds < 0 {
 		errs = append(errs, invalidErr(p.Child("terminationGracePeriodSeconds"), *s.TerminationGracePeriodSeconds, "must be greater than or equal to 0"))
 	}
+
+	errs = append(errs, validateResourceRequirements(s.Resources, p.Child("resources"))...)
+	if s.LivenessProbe != nil {
+		errs = append(errs, validateProbe(s.LivenessProbe, p.Child("livenessProbe"), true)...)
+	}
+	if s.ReadinessProbe != nil {
+		errs = append(errs, validateProbe(s.ReadinessProbe, p.Child("readinessProbe"), false)...)
+	}
 	return errs
+}
+
+func validateResourceRequirements(r ResourceRequirements, p *Path) ErrorList {
+	if r.Limits.Empty() {
+		return nil
+	}
+	var errs ErrorList
+	limPath := p.Child("limits")
+	if r.Limits.Memory != "" {
+		if _, err := ParseMemoryBytes(r.Limits.Memory); err != nil {
+			errs = append(errs, invalidErr(limPath.Child("memory"), r.Limits.Memory, err.Error()))
+		}
+	}
+	if r.Limits.CPUWeight != nil {
+		w := *r.Limits.CPUWeight
+		if w < 1 || w > 10000 {
+			errs = append(errs, invalidErr(limPath.Child("cpuWeight"), w, "must be between 1 and 10000"))
+		}
+	}
+	if r.Limits.Pids != nil && *r.Limits.Pids < 1 {
+		errs = append(errs, invalidErr(limPath.Child("pids"), *r.Limits.Pids, "must be greater than or equal to 1"))
+	}
+	return errs
+}
+
+func validateProbe(probe *Probe, p *Path, liveness bool) ErrorList {
+	var errs ErrorList
+	handlers := 0
+	if probe.Exec != nil {
+		handlers++
+	}
+	if probe.HTTPGet != nil {
+		handlers++
+	}
+	if probe.TCPSocket != nil {
+		handlers++
+	}
+	switch handlers {
+	case 0:
+		errs = append(errs, requiredErr(p, "exactly one of exec, httpGet, or tcpSocket is required"))
+	case 1:
+		// ok
+	default:
+		errs = append(errs, invalidErr(p, handlers, "exactly one of exec, httpGet, or tcpSocket is required"))
+	}
+
+	if probe.Exec != nil {
+		execPath := p.Child("exec")
+		switch {
+		case len(probe.Exec.Command) == 0:
+			errs = append(errs, requiredErr(execPath.Child("command"), ""))
+		case probe.Exec.Command[0] == "":
+			errs = append(errs, invalidErr(execPath.Child("command").Index(0), probe.Exec.Command[0], "executable must not be empty"))
+		}
+	}
+	if probe.HTTPGet != nil {
+		errs = append(errs, validatePort(probe.HTTPGet.Port, p.Child("httpGet").Child("port"))...)
+		switch probe.HTTPGet.Scheme {
+		case "", URISchemeHTTP, URISchemeHTTPS:
+		default:
+			errs = append(errs, notSupportedErr(p.Child("httpGet").Child("scheme"), probe.HTTPGet.Scheme,
+				[]string{string(URISchemeHTTP), string(URISchemeHTTPS)}))
+		}
+		for i, h := range probe.HTTPGet.HTTPHeaders {
+			if h.Name == "" {
+				errs = append(errs, requiredErr(p.Child("httpGet").Child("httpHeaders").Index(i).Child("name"), ""))
+			}
+		}
+	}
+	if probe.TCPSocket != nil {
+		errs = append(errs, validatePort(probe.TCPSocket.Port, p.Child("tcpSocket").Child("port"))...)
+	}
+
+	if probe.InitialDelaySeconds < 0 {
+		errs = append(errs, invalidErr(p.Child("initialDelaySeconds"), probe.InitialDelaySeconds, "must be greater than or equal to 0"))
+	}
+	if probe.TimeoutSeconds < 1 {
+		errs = append(errs, invalidErr(p.Child("timeoutSeconds"), probe.TimeoutSeconds, "must be greater than or equal to 1"))
+	}
+	if probe.PeriodSeconds < 1 {
+		errs = append(errs, invalidErr(p.Child("periodSeconds"), probe.PeriodSeconds, "must be greater than or equal to 1"))
+	}
+	if probe.SuccessThreshold < 1 {
+		errs = append(errs, invalidErr(p.Child("successThreshold"), probe.SuccessThreshold, "must be greater than or equal to 1"))
+	}
+	if liveness && probe.SuccessThreshold != 1 {
+		errs = append(errs, invalidErr(p.Child("successThreshold"), probe.SuccessThreshold, "must be 1 for liveness probes"))
+	}
+	if probe.FailureThreshold < 1 {
+		errs = append(errs, invalidErr(p.Child("failureThreshold"), probe.FailureThreshold, "must be greater than or equal to 1"))
+	}
+	return errs
+}
+
+func validatePort(port int32, p *Path) ErrorList {
+	if port < 1 || port > 65535 {
+		return ErrorList{invalidErr(p, port, "must be between 1 and 65535")}
+	}
+	return nil
 }
 
 func validateLabels(labels map[string]string, p *Path) ErrorList {

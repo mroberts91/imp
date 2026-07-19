@@ -45,7 +45,7 @@ spec:
         app: demo
         role: web
     spec:
-      command: ["python3", "-m", "http.server", "8080", "--directory", "/var/tmp/demo"]
+      command: ["python3", "-m", "http.server", "15432", "--directory", "/var/tmp/demo"]
       workingDir: /var/tmp/demo
       env:
         - name: PYTHONUNBUFFERED

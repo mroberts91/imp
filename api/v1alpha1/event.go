@@ -28,6 +28,10 @@ const (
 	ReasonDeleted          = "Deleted"
 	ReasonScalingReplicas  = "ScalingReplicas"
 	ReasonTemplateChanged  = "TemplateChanged"
+	ReasonProbeFailed      = "ProbeFailed"
+	ReasonUnhealthy        = "Unhealthy"
+	ReasonAdopted          = "Adopted"
+	ReasonOrphanKilled     = "OrphanKilled"
 )
 
 // Event is an append-only, TTL-bounded record of something notable happening

@@ -14,13 +14,13 @@
 // ordinals first on scale-down) is the monotonic-identity instinct of
 // pkg/controller/statefulset/stateful_set_control.go; the condition
 // vocabulary and set-condition semantics are forked from
-// pkg/controller/deployment/util/deployment_util.go (see conditions.go).
-// Deltas: owned Procs are matched by the impd.sh/daemon-name label rather
-// than a selector; the only update strategy is Recreate (delete every
-// stale-template Proc, requeue, create replacements on a later pass); no
-// expectations machinery and no SlowStartBatch - the informer-backed cache
-// plus level-triggered requeues carry convergence; events are applied
-// directly through the client (no recorder/broadcaster until M2).
+// pkg/controller/deployment/util/deployment_util.go (see api/v1alpha1
+// conditions helpers). Deltas: owned Procs are matched by the
+// impd.sh/daemon-name label rather than a selector; the only update
+// strategy is Recreate (delete every stale-template Proc, requeue, create
+// replacements on a later pass); no expectations machinery and no
+// SlowStartBatch - the informer-backed cache plus level-triggered requeues
+// carry convergence; events go through internal/recorder.
 package daemon
 
 import (
@@ -40,10 +40,14 @@ import (
 	"github.com/mroberts91/imp/internal/cache"
 	"github.com/mroberts91/imp/internal/clock"
 	"github.com/mroberts91/imp/internal/controllers"
+	"github.com/mroberts91/imp/internal/recorder"
 	"github.com/mroberts91/imp/pkg/client"
 )
 
 const componentName = "daemon-controller"
+
+// ReportingComponent is stamped on Events emitted by this controller.
+const ReportingComponent = "controllers/daemon"
 
 // recreateDelay spaces the passes of a Recreate rollout: pass one deletes
 // the stale Procs and schedules pass two, which creates the replacements.
@@ -55,27 +59,32 @@ const recreateDelay = 1 * time.Second
 // writes only through the client; wiring (informers, queue, runner) is the
 // caller's job.
 type Controller struct {
-	client  *client.Client
-	daemons *cache.Store
-	procs   *cache.Store
-	clock   clock.Clock
-	log     *slog.Logger
+	client   *client.Client
+	daemons  *cache.Store
+	procs    *cache.Store
+	clock    clock.Clock
+	recorder *recorder.Recorder
+	log      *slog.Logger
 }
 
 var _ controllers.Reconciler = (*Controller)(nil)
 
 // New builds a Controller over cl and the two informer stores. A nil clk
-// means the real clock.
-func New(cl *client.Client, daemons, procs *cache.Store, clk clock.Clock) *Controller {
+// means the real clock. A nil rec builds a recorder with ReportingComponent.
+func New(cl *client.Client, daemons, procs *cache.Store, clk clock.Clock, rec *recorder.Recorder) *Controller {
 	if clk == nil {
 		clk = clock.Real{}
 	}
+	if rec == nil {
+		rec = recorder.New(cl, ReportingComponent, clk)
+	}
 	return &Controller{
-		client:  cl,
-		daemons: daemons,
-		procs:   procs,
-		clock:   clk,
-		log:     slog.With("component", componentName),
+		client:   cl,
+		daemons:  daemons,
+		procs:    procs,
+		clock:    clk,
+		recorder: rec,
+		log:      slog.With("component", componentName),
 	}
 }
 
@@ -295,7 +304,7 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 	var ready int32
 	for _, set := range [][]v1alpha1.Proc{current, stale} {
 		for i := range set {
-			if set[i].Status.Phase == v1alpha1.ProcPhaseRunning {
+			if procReady(&set[i]) {
 				ready++
 			}
 		}
@@ -341,8 +350,8 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 		fresh.Status.Replicas = total
 		fresh.Status.UpdatedReplicas = updated
 		fresh.Status.ReadyReplicas = ready
-		setCondition(&fresh.Status, avail)
-		setCondition(&fresh.Status, prog)
+		v1alpha1.SetStatusCondition(&fresh.Status.Conditions, avail)
+		v1alpha1.SetStatusCondition(&fresh.Status.Conditions, prog)
 		_, err = c.client.UpdateDaemonStatus(ctx, fresh)
 		return err
 	})
@@ -354,4 +363,13 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 		return fmt.Errorf("updating status of %s/%s: %w", v1alpha1.KindDaemon, name, err)
 	}
 	return nil
+}
+
+// procReady reports whether p should count toward readyReplicas: Ready
+// condition True when present, else Phase==Running (M1-era fallback).
+func procReady(p *v1alpha1.Proc) bool {
+	if c := v1alpha1.FindStatusCondition(p.Status.Conditions, v1alpha1.ConditionTypeReady); c != nil {
+		return c.Status == v1alpha1.ConditionTrue
+	}
+	return p.Status.Phase == v1alpha1.ProcPhaseRunning
 }

@@ -91,6 +91,62 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 	if in.TerminationGracePeriodSeconds != nil {
 		out.TerminationGracePeriodSeconds = new(*in.TerminationGracePeriodSeconds)
 	}
+	out.Resources = *in.Resources.DeepCopy()
+	if in.LivenessProbe != nil {
+		out.LivenessProbe = in.LivenessProbe.DeepCopy()
+	}
+	if in.ReadinessProbe != nil {
+		out.ReadinessProbe = in.ReadinessProbe.DeepCopy()
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *ResourceRequirements) DeepCopy() *ResourceRequirements {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Limits = *in.Limits.DeepCopy()
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *ResourceLimits) DeepCopy() *ResourceLimits {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.CPUWeight != nil {
+		out.CPUWeight = new(*in.CPUWeight)
+	}
+	if in.Pids != nil {
+		out.Pids = new(*in.Pids)
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *Probe) DeepCopy() *Probe {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.Exec != nil {
+		out.Exec = &ExecAction{Command: slices.Clone(in.Exec.Command)}
+	}
+	if in.HTTPGet != nil {
+		out.HTTPGet = &HTTPGetAction{
+			Path:        in.HTTPGet.Path,
+			Port:        in.HTTPGet.Port,
+			Host:        in.HTTPGet.Host,
+			Scheme:      in.HTTPGet.Scheme,
+			HTTPHeaders: slices.Clone(in.HTTPGet.HTTPHeaders),
+		}
+	}
+	if in.TCPSocket != nil {
+		out.TCPSocket = new(*in.TCPSocket)
+	}
 	return &out
 }
 

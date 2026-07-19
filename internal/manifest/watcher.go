@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"log/slog"
 	"maps"
 	"os"
@@ -32,6 +31,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
+	"github.com/mroberts91/imp/internal/recorder"
 	"github.com/mroberts91/imp/pkg/client"
 )
 
@@ -48,18 +48,23 @@ type Watcher struct {
 	client      *client.Client
 	dir         string
 	rescanEvery time.Duration
+	recorder    *recorder.Recorder
 	log         *slog.Logger
 }
 
-func NewWatcher(c *client.Client, dir string, opts *Options) *Watcher {
+func NewWatcher(c *client.Client, dir string, opts *Options, rec *recorder.Recorder) *Watcher {
 	interval := defaultRescanInterval
 	if opts != nil && opts.RescanInterval > 0 {
 		interval = opts.RescanInterval
+	}
+	if rec == nil {
+		rec = recorder.New(c, "manifest", nil)
 	}
 	return &Watcher{
 		client:      c,
 		dir:         dir,
 		rescanEvery: interval,
+		recorder:    rec,
 		log:         slog.With("component", "manifest"),
 	}
 }
@@ -201,35 +206,14 @@ func (w *Watcher) scan(ctx context.Context) error {
 	return nil
 }
 
-// emitDuplicateEvent records a duplicate-identity Warning once per
-// (identity, winner, loser) combination.
+// emitDuplicateEvent records a duplicate-identity Warning. The recorder
+// aggregates identical messages, so rescans bump count rather than creating
+// a new Event each pass.
 func (w *Watcher) emitDuplicateEvent(ctx context.Context, id identity, winner, loser string) {
-	h := fnv.New32a()
-	fmt.Fprintf(h, "%s|%s|%s|%s", id.Kind, id.Name, winner, loser)
-	name := fmt.Sprintf("%s.%08x", id.Name, h.Sum32())
-
-	if _, err := w.client.GetEvent(ctx, name); err == nil {
-		return // already reported
-	} else if !errors.Is(err, v1alpha1.ErrNotFound) {
-		w.log.Warn("checking for duplicate-identity event failed", "event", name, "error", err)
-		return
-	}
-	now := v1alpha1.NewTime(time.Now())
-	_, err := w.client.ApplyEvent(ctx, &v1alpha1.Event{
-		Metadata:  v1alpha1.ObjectMeta{Name: name},
-		Regarding: v1alpha1.ObjectRef{Kind: id.Kind, Name: id.Name},
-		Type:      v1alpha1.EventTypeWarning,
-		Reason:    v1alpha1.ReasonFailedValidation,
-		Message: fmt.Sprintf("duplicate identity %s/%s: kept the definition in %s, ignored the one in %s",
-			strings.ToLower(id.Kind), id.Name, winner, loser),
-		Count:              1,
-		FirstTimestamp:     now,
-		LastTimestamp:      now,
-		ReportingComponent: "manifest",
-	})
-	if err != nil {
-		w.log.Warn("emitting duplicate-identity event failed", "event", name, "error", err)
-	}
+	w.recorder.Eventf(ctx, v1alpha1.ObjectRef{Kind: id.Kind, Name: id.Name},
+		v1alpha1.EventTypeWarning, v1alpha1.ReasonFailedValidation,
+		"duplicate identity %s/%s: kept the definition in %s, ignored the one in %s",
+		strings.ToLower(id.Kind), id.Name, winner, loser)
 }
 
 // annotate returns the body with the given annotations merged in.

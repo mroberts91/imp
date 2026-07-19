@@ -45,6 +45,13 @@ func TestComputeProcAction(t *testing.T) {
 			want:   ActionStop,
 		},
 		{
+			name:   "running liveness failed",
+			exists: true,
+			policy: v1alpha1.RestartPolicyAlways,
+			rt:     &RuntimeRecord{Running: true, PID: 42, StartedOnce: true, LivenessFailed: true},
+			want:   ActionStop,
+		},
+		{
 			name:   "deleted and already stopped",
 			exists: false,
 			policy: v1alpha1.RestartPolicyAlways,

@@ -55,7 +55,7 @@ func newFixture(t *testing.T) *fixture {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	return &fixture{client: c, dir: dir, w: NewWatcher(c, dir, nil)}
+	return &fixture{client: c, dir: dir, w: NewWatcher(c, dir, nil, nil)}
 }
 
 func (f *fixture) write(t *testing.T, name, content string) {
@@ -148,8 +148,8 @@ func TestScanFirstFileWins(t *testing.T) {
 		t.Errorf("source-path = %q, want a.yaml", web.Metadata.Annotations[v1alpha1.AnnotationSourcePath])
 	}
 
-	// The loser is reported once as a Warning event, and stays reported
-	// once across re-scans.
+	// The loser is reported as a Warning event; rescans aggregate onto the
+	// same object rather than creating another.
 	f.scan(t)
 	events, _, err := f.client.ListEvents(ctx)
 	if err != nil {
@@ -159,6 +159,9 @@ func TestScanFirstFileWins(t *testing.T) {
 		t.Fatalf("got %d events, want exactly 1: %+v", len(events), events)
 	}
 	ev := events[0]
+	if ev.Count < 2 {
+		t.Errorf("count = %d, want >= 2 after rescan aggregation", ev.Count)
+	}
 	if ev.Type != v1alpha1.EventTypeWarning || ev.Reason != v1alpha1.ReasonFailedValidation {
 		t.Errorf("event = %s/%s", ev.Type, ev.Reason)
 	}
@@ -276,7 +279,7 @@ func TestWatcherFsnotifyPath(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	// A one-hour re-scan proves reactions come from fsnotify, not the ticker.
-	w := NewWatcher(f.client, f.dir, &Options{RescanInterval: time.Hour})
+	w := NewWatcher(f.client, f.dir, &Options{RescanInterval: time.Hour}, nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -319,7 +322,7 @@ func TestWatcherRescanHealsDeadFsnotify(t *testing.T) {
 	f := newFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	w := NewWatcher(f.client, f.dir, &Options{RescanInterval: 100 * time.Millisecond})
+	w := NewWatcher(f.client, f.dir, &Options{RescanInterval: 100 * time.Millisecond}, nil)
 	go w.Run(ctx) //nolint:errcheck // exercised via effects
 
 	f.write(t, "web.yaml", daemonYAML("web", "60"))

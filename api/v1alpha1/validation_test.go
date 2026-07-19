@@ -157,6 +157,120 @@ func TestValidateDaemon(t *testing.T) {
 			},
 			wantFields: []string{"metadata.name", "spec.replicas", "spec.template.spec.command"},
 		},
+		{
+			name: "valid resources and probes",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Resources = ResourceRequirements{
+					Limits: ResourceLimits{
+						Memory:    "256Mi",
+						CPUWeight: new(int64(100)),
+						Pids:      new(int64(64)),
+					},
+				}
+				d.Spec.Template.Spec.LivenessProbe = &Probe{
+					Exec:             &ExecAction{Command: []string{"true"}},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 1,
+					FailureThreshold: 3,
+				}
+				d.Spec.Template.Spec.ReadinessProbe = &Probe{
+					HTTPGet: &HTTPGetAction{
+						Path:   "/readyz",
+						Port:   8080,
+						Host:   "127.0.0.1",
+						Scheme: URISchemeHTTP,
+					},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 1,
+					FailureThreshold: 3,
+				}
+			},
+		},
+		{
+			name: "bad memory quantity",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Resources.Limits.Memory = "256M"
+			},
+			wantFields: []string{"spec.template.spec.resources.limits.memory"},
+		},
+		{
+			name: "cpuWeight out of range",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Resources.Limits.CPUWeight = new(int64(0))
+			},
+			wantFields: []string{"spec.template.spec.resources.limits.cpuWeight"},
+		},
+		{
+			name: "pids below 1",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Resources.Limits.Pids = new(int64(0))
+			},
+			wantFields: []string{"spec.template.spec.resources.limits.pids"},
+		},
+		{
+			name: "probe missing handler",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.ReadinessProbe = &Probe{
+					TimeoutSeconds: 1, PeriodSeconds: 10, SuccessThreshold: 1, FailureThreshold: 3,
+				}
+			},
+			wantFields: []string{"spec.template.spec.readinessProbe"},
+		},
+		{
+			name: "probe two handlers",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.ReadinessProbe = &Probe{
+					Exec:             &ExecAction{Command: []string{"true"}},
+					TCPSocket:        &TCPSocketAction{Port: 8080},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 1,
+					FailureThreshold: 3,
+				}
+			},
+			wantFields: []string{"spec.template.spec.readinessProbe"},
+		},
+		{
+			name: "httpGet bad port",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.ReadinessProbe = &Probe{
+					HTTPGet:          &HTTPGetAction{Port: 0},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 1,
+					FailureThreshold: 3,
+				}
+			},
+			wantFields: []string{"spec.template.spec.readinessProbe.httpGet.port"},
+		},
+		{
+			name: "liveness successThreshold must be 1",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.LivenessProbe = &Probe{
+					Exec:             &ExecAction{Command: []string{"true"}},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 2,
+					FailureThreshold: 3,
+				}
+			},
+			wantFields: []string{"spec.template.spec.livenessProbe.successThreshold"},
+		},
+		{
+			name: "exec probe empty command",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.ReadinessProbe = &Probe{
+					Exec:             &ExecAction{},
+					TimeoutSeconds:   1,
+					PeriodSeconds:    10,
+					SuccessThreshold: 1,
+					FailureThreshold: 3,
+				}
+			},
+			wantFields: []string{"spec.template.spec.readinessProbe.exec.command"},
+		},
 	}
 
 	for _, tc := range cases {

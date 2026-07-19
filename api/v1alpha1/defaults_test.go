@@ -74,3 +74,53 @@ func TestDefaultProc(t *testing.T) {
 		t.Errorf("TerminationGracePeriodSeconds = %v, want %d", p.Spec.TerminationGracePeriodSeconds, DefaultTerminationGracePeriodSeconds)
 	}
 }
+
+func TestDefaultProbe(t *testing.T) {
+	d := &Daemon{
+		Metadata: ObjectMeta{Name: "web"},
+		Spec: DaemonSpec{
+			Template: ProcTemplate{Spec: ProcTemplateSpec{
+				Command: []string{"/bin/true"},
+				LivenessProbe: &Probe{
+					HTTPGet: &HTTPGetAction{Port: 8080},
+				},
+				ReadinessProbe: &Probe{
+					TCPSocket: &TCPSocketAction{Port: 8080},
+				},
+			}},
+		},
+	}
+	DefaultDaemon(d)
+
+	lp := d.Spec.Template.Spec.LivenessProbe
+	if lp.TimeoutSeconds != DefaultProbeTimeoutSeconds ||
+		lp.PeriodSeconds != DefaultProbePeriodSeconds ||
+		lp.SuccessThreshold != DefaultProbeSuccessThreshold ||
+		lp.FailureThreshold != DefaultProbeFailureThreshold {
+		t.Errorf("liveness timing defaults: %+v", lp)
+	}
+	if lp.HTTPGet.Host != DefaultHTTPGetHost || lp.HTTPGet.Scheme != URISchemeHTTP {
+		t.Errorf("httpGet defaults: %+v", lp.HTTPGet)
+	}
+
+	rp := d.Spec.Template.Spec.ReadinessProbe
+	if rp.TCPSocket.Host != DefaultTCPSocketHost {
+		t.Errorf("tcpSocket host = %q, want %q", rp.TCPSocket.Host, DefaultTCPSocketHost)
+	}
+}
+
+func TestDefaultProbePreservesSetValues(t *testing.T) {
+	p := &Probe{
+		Exec:                &ExecAction{Command: []string{"true"}},
+		InitialDelaySeconds: 5,
+		TimeoutSeconds:      2,
+		PeriodSeconds:       15,
+		SuccessThreshold:    1,
+		FailureThreshold:    5,
+	}
+	DefaultProbe(p)
+	if p.InitialDelaySeconds != 5 || p.TimeoutSeconds != 2 || p.PeriodSeconds != 15 ||
+		p.SuccessThreshold != 1 || p.FailureThreshold != 5 {
+		t.Errorf("set probe values overwritten: %+v", p)
+	}
+}

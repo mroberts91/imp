@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Michael Robertson 2026
+# SPDX-License-Identifier: Apache-2.0
+
 # common.sh - shared helpers for imp's bootstrap scripts.
 # Sourced by install.sh and uninstall.sh; not meant to be run directly.
 #
@@ -6,10 +9,12 @@
 # second time. That is what makes the installer re-runnable after an upgrade.
 #
 # How impd is actually configured: flags only (--socket, --data-dir,
-# --manifest-dir, --log-level). impd reads no environment variables. The
-# IMP_* variables below configure THESE SCRIPTS - they decide which paths get
-# created and which flags the service files pass. The one env var the
-# binaries themselves know is IMP_SOCKET, read by impctl to find the socket.
+# --manifest-dir, --log-level, --cgroup-root, --metrics-addr,
+# --kill-procs-on-shutdown, --event-ttl). impd reads no environment variables
+# for paths. The IMP_* variables below configure THESE SCRIPTS - they decide
+# which paths get created and which flags the service files pass. The one env
+# var the binaries themselves know is IMP_SOCKET, read by impctl to find the
+# socket.
 
 # ---------------------------------------------------------------------------
 # Configuration (override by exporting before invoking install.sh)
@@ -24,6 +29,8 @@
 : "${IMP_RUN_DIR:=/run/imp}"               # holds the unix socket (tmpfs)
 : "${IMP_SOCKET:=${IMP_RUN_DIR}/impd.sock}"  # --socket (and impctl's IMP_SOCKET)
 : "${IMP_BIN_DIR:=/usr/local/bin}"         # where impd/impctl get installed
+# OpenRC: writable cgroup v2 subtree for --cgroup-root (systemd uses Delegate=).
+: "${IMP_CGROUP_ROOT:=}"
 
 # ---------------------------------------------------------------------------
 # Output helpers

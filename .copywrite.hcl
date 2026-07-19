@@ -12,5 +12,7 @@ project {
     "**autogen**",
     "*.yml",
     "*.yaml",
+    "**/*.yaml",
+    "**/*.yml",
   ]
 }

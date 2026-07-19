@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Michael Robertson 2026
+# SPDX-License-Identifier: Apache-2.0
+
 # M1 acceptance: manifest dir → live restarting Daemon → get/logs →
 # kill -9 backoff → sweep → clean SIGTERM. Rootless; exits non-zero on failure.
 set -euo pipefail
@@ -24,8 +27,11 @@ WORKDIR="${TMPDIR:-/tmp}/imp-m1-acceptance-$$"
 SOCKET="$WORKDIR/impd.sock"
 DATA="$WORKDIR/data"
 MANIFESTS="$WORKDIR/manifests"
+CGROUP_ROOT="$WORKDIR/cgroup"
 IMPD_LOG="$WORKDIR/impd.log"
-mkdir -p "$DATA" "$MANIFESTS"
+mkdir -p "$DATA" "$MANIFESTS" "$CGROUP_ROOT"
+printf 'cpu memory pids\n' >"$CGROUP_ROOT/cgroup.controllers"
+: >"$CGROUP_ROOT/cgroup.subtree_control"
 cleanup() {
   if [[ -n "${IMPD_PID:-}" ]] && kill -0 "$IMPD_PID" 2>/dev/null; then
     kill -TERM "$IMPD_PID" 2>/dev/null || true
@@ -36,7 +42,7 @@ cleanup() {
 trap cleanup EXIT
 
 export IMP_SOCKET="$SOCKET"
-IMPD=(bin/impd --socket "$SOCKET" --data-dir "$DATA" --manifest-dir "$MANIFESTS" --log-level info)
+IMPD=(bin/impd --socket "$SOCKET" --data-dir "$DATA" --manifest-dir "$MANIFESTS" --cgroup-root "$CGROUP_ROOT" --kill-procs-on-shutdown --metrics-addr= --log-level info)
 IMPCTL=(bin/impctl)
 
 log "starting impd in $WORKDIR"

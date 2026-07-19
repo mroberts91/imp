@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Copyright Michael Robertson 2026
+# SPDX-License-Identifier: Apache-2.0
+
 # install.sh - bootstrap imp in one of three modes.
 #
 #   ./install.sh ad-hoc            run as your user, XDG paths, no init system
@@ -84,9 +87,18 @@ cmd_adhoc() {
     fi
 
     mkdir -p "$data" "$manifests" "$state" "$run"
+    # Per-Proc cgroup root (required by impd). Ad-hoc uses a fake filesystem
+    # tree under state so rootless starts work without systemd Delegate=;
+    # limits are not kernel-enforced until a real cgroup v2 subtree is passed.
+    local cgroup_root="$state/cgroup"
+    mkdir -p "$cgroup_root"
+    printf 'cpu memory pids\n' >"$cgroup_root/cgroup.controllers"
+    : >"$cgroup_root/cgroup.subtree_control"
     log "data      $data"
     log "manifests $manifests"
     log "socket    $sock"
+    log "cgroup    $cgroup_root (fake; limits NOT kernel-enforced — see docs/install.md)"
+    log "note      fake ≠ real limits; set --cgroup-root to a delegated cgroup v2 dir for enforcement"
 
     local impd; impd="$(find_binary impd)"
 
@@ -94,10 +106,10 @@ cmd_adhoc() {
         foreground)
             log "starting impd in the foreground (Ctrl-C to stop)"
             log "in another shell: export IMP_SOCKET=$sock && impctl get daemons"
-            exec "$impd" --socket "$sock" --data-dir "$data" --manifest-dir "$manifests"
+            exec "$impd" --socket "$sock" --data-dir "$data" --manifest-dir "$manifests" --cgroup-root "$cgroup_root" --kill-procs-on-shutdown
             ;;
         detach)
-            "$impd" --socket "$sock" --data-dir "$data" --manifest-dir "$manifests" \
+            "$impd" --socket "$sock" --data-dir "$data" --manifest-dir "$manifests" --cgroup-root "$cgroup_root" --kill-procs-on-shutdown \
                 >>"$state/impd.log" 2>&1 &
             log "impd started (pid $!); logs -> $state/impd.log"
             log "point impctl at it with: export IMP_SOCKET=$sock"
@@ -110,7 +122,9 @@ Dirs are ready. Start impd with:
     $impd \\
         --socket $sock \\
         --data-dir $data \\
-        --manifest-dir $manifests
+        --manifest-dir $manifests \\
+        --cgroup-root $cgroup_root \\
+        --kill-procs-on-shutdown
 
 and point impctl at it:
 
@@ -174,8 +188,47 @@ IMP_MANIFEST_DIR="${IMP_MANIFEST_DIR}"
 IMP_RUN_DIR="${IMP_RUN_DIR}"
 IMP_SOCKET="${IMP_SOCKET}"
 IMP_LOG_FILE="${IMP_LOG_DIR}/impd.log"
+IMP_CGROUP_ROOT="${IMP_CGROUP_ROOT}"
 EOF
     log "config /etc/conf.d/imp (custom config)"
+}
+
+# prepare_openrc_cgroup creates a dedicated cgroup v2 directory for the imp
+# user when possible. Parent subtree_control must already allow controllers;
+# see docs/install.md if mkdir fails or limits do not apply.
+prepare_openrc_cgroup() {
+    if [ -n "${IMP_CGROUP_ROOT}" ]; then
+        return 0
+    fi
+    if [ ! -d /sys/fs/cgroup ]; then
+        warn "no /sys/fs/cgroup; OpenRC installs need IMP_CGROUP_ROOT (docs/install.md)"
+        return 0
+    fi
+    local root=/sys/fs/cgroup/imp
+    if mkdir -p "$root" 2>/dev/null; then
+        chown "${IMP_USER}:${IMP_GROUP}" "$root" 2>/dev/null || true
+        IMP_CGROUP_ROOT="$root"
+        log "cgroup    $root (OpenRC; ensure parent has memory/cpu/pids in subtree_control)"
+    else
+        warn "could not create $root — set IMP_CGROUP_ROOT before start (docs/install.md)"
+    fi
+}
+
+print_cgroup_note_systemd() {
+    cat >&2 <<EOF
+
+Cgroups: unit has Delegate=yes; impd auto-detects its service cgroup (omit --cgroup-root).
+Default shutdown leaves Procs running for re-attach; use impctl delete or --kill-procs-on-shutdown to tear down.
+Metrics: http://127.0.0.1:9090/metrics (override with --metrics-addr= to disable).
+EOF
+}
+
+print_cgroup_note_openrc() {
+    cat >&2 <<EOF
+
+Cgroups: OpenRC has no Delegate=. ${IMP_CGROUP_ROOT:+Using IMP_CGROUP_ROOT=$IMP_CGROUP_ROOT. }See docs/install.md for the prepared-subtree recipe.
+Default shutdown leaves Procs running for re-attach; add --kill-procs-on-shutdown to command_args for full tear-down.
+EOF
 }
 
 # ---------------------------------------------------------------------------
@@ -214,6 +267,7 @@ cmd_systemd() {
         log "installed. start with: systemctl enable --now imp"
     fi
     print_socket_access_note
+    print_cgroup_note_systemd
 }
 
 # ---------------------------------------------------------------------------
@@ -237,10 +291,12 @@ cmd_openrc() {
     ensure_user
     ensure_dirs
     install_binaries
+    prepare_openrc_cgroup
 
     install -m 0755 "$HERE/openrc/imp" /etc/init.d/imp
     log "init script /etc/init.d/imp"
-    if config_customized; then
+    # Always write conf.d when we have a cgroup root or custom paths.
+    if config_customized || [ -n "${IMP_CGROUP_ROOT}" ]; then
         write_openrc_confd
     fi
 
@@ -252,6 +308,7 @@ cmd_openrc() {
         log "installed. enable with: rc-update add imp default && rc-service imp start"
     fi
     print_socket_access_note
+    print_cgroup_note_openrc
 }
 
 # ---------------------------------------------------------------------------

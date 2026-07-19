@@ -84,7 +84,7 @@ func startHarness(t *testing.T) *harness {
 	clk := clock.NewFake(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
 	return &harness{
 		cl:      cl,
-		c:       New(cl, dinf.Store(), pinf.Store(), clk),
+		c:       New(cl, dinf.Store(), pinf.Store(), clk, nil),
 		clk:     clk,
 		daemons: dinf.Store(),
 		procs:   pinf.Store(),
@@ -282,7 +282,7 @@ func TestReconcileExpandsDaemonToProcs(t *testing.T) {
 	if ev.Regarding.Kind != v1alpha1.KindDaemon || ev.Regarding.Name != "web" || ev.Regarding.UID != d.Metadata.UID {
 		t.Errorf("Created event regarding = %+v, want Daemon/web with UID %s", ev.Regarding, d.Metadata.UID)
 	}
-	if ev.Type != v1alpha1.EventTypeNormal || ev.ReportingComponent != componentName {
+	if ev.Type != v1alpha1.EventTypeNormal || ev.ReportingComponent != ReportingComponent {
 		t.Errorf("Created event type/component = %s/%s", ev.Type, ev.ReportingComponent)
 	}
 }
@@ -407,7 +407,7 @@ func TestReconcileStatusRollupConvergesWithoutChurn(t *testing.T) {
 		t.Errorf("readyReplicas = %d, want 0", d.Status.ReadyReplicas)
 	}
 
-	avail := getCondition(d.Status, v1alpha1.ConditionTypeAvailable)
+	avail := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeAvailable)
 	if avail == nil {
 		t.Fatal("no Available condition")
 	}
@@ -420,7 +420,7 @@ func TestReconcileStatusRollupConvergesWithoutChurn(t *testing.T) {
 	if avail.ObservedGeneration != d.Metadata.Generation {
 		t.Errorf("Available.observedGeneration = %d, want %d", avail.ObservedGeneration, d.Metadata.Generation)
 	}
-	prog := getCondition(d.Status, v1alpha1.ConditionTypeProgressing)
+	prog := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeProgressing)
 	if prog == nil {
 		t.Fatal("no Progressing condition")
 	}
@@ -447,7 +447,7 @@ func TestReconcileStatusRollupConvergesWithoutChurn(t *testing.T) {
 	if d2.Metadata.ResourceVersion != rv {
 		t.Errorf("resourceVersion churned %s -> %s on a no-op pass", rv, d2.Metadata.ResourceVersion)
 	}
-	avail2 := getCondition(d2.Status, v1alpha1.ConditionTypeAvailable)
+	avail2 := v1alpha1.FindStatusCondition(d2.Status.Conditions, v1alpha1.ConditionTypeAvailable)
 	if avail2 == nil {
 		t.Fatal("Available condition vanished")
 	}

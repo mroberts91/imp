@@ -62,4 +62,22 @@ func TestHashProcTemplateSensitivity(t *testing.T) {
 	if HashProcTemplate(regraced) == base {
 		t.Error("grace period change did not change hash")
 	}
+
+	withProbe := templateForHash()
+	withProbe.Spec.ReadinessProbe = &Probe{
+		TCPSocket:        &TCPSocketAction{Port: 8080},
+		TimeoutSeconds:   1,
+		PeriodSeconds:    10,
+		SuccessThreshold: 1,
+		FailureThreshold: 3,
+	}
+	if HashProcTemplate(withProbe) == base {
+		t.Error("readinessProbe addition did not change hash")
+	}
+
+	withLimits := templateForHash()
+	withLimits.Spec.Resources.Limits.Memory = "128Mi"
+	if HashProcTemplate(withLimits) == base {
+		t.Error("resources.limits.memory addition did not change hash")
+	}
 }

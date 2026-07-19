@@ -5,8 +5,9 @@ for managing daemons — a middle ground between systemd and Nomad. One daemon
 binary (`impd`) hosts the API, object store, controllers, and process
 supervisor; a CLI (`impctl`) talks to it over a Unix domain socket.
 
-**M1 (“it runs things”) is complete:** drop a Daemon manifest → Procs start →
-`impctl get` / `impctl logs` work; crash loops back off; deletes cascade.
+**M1–M3 complete:** drop a Daemon → Procs start → conditions/Events explain
+failures → cgroup limits, probes, `/metrics`, and D1 re-attach. Gates:
+`task accept:m1`, `task accept:m2`, `task accept:m3`.
 
 ## Quick start (rootless)
 
@@ -18,25 +19,38 @@ task ctl -- apply -f examples/01-hello-daemon.yaml
 task ctl -- get daemons
 task ctl -- get procs
 task ctl -- logs hello
+task ctl -- describe daemon hello
 task ctl -- delete daemon hello
 ```
+
+Rootless `task run` creates a synthetic `--cgroup-root` so impd can start
+without privileges; set `--cgroup-root` to a delegated cgroup v2 directory
+(or install with systemd `Delegate=yes`) before relying on memory/cpu/pids
+limits or restart re-attachment.
 
 Or point both binaries at an explicit stack:
 
 ```sh
 task build
 mkdir -p data manifests
-bin/impd --socket ./imp.sock --data-dir ./data --manifest-dir ./manifests &
+# still need a cgroup root (fake tree or real delegated path):
+mkdir -p data/cgroup && printf 'cpu memory pids\n' >data/cgroup/cgroup.controllers
+: >data/cgroup/cgroup.subtree_control
+bin/impd --socket ./imp.sock --data-dir ./data --manifest-dir ./manifests \
+  --cgroup-root ./data/cgroup --kill-procs-on-shutdown &
 export IMP_SOCKET=./imp.sock
 cp examples/01-hello-daemon.yaml manifests/   # GitOps: watcher applies it
 bin/impctl get procs
 bin/impctl logs hello
 ```
 
-Regression gate for the M1 surface: `task accept:m1`.
+Regression gates: `task accept:m1`, `task accept:m2`, `task accept:m3`. Metrics
+(when enabled): `curl -s http://127.0.0.1:9090/metrics`.
 
 Go version is pinned in `.go-version`. See `task --list` for build/check/cross
-targets. Tutorial manifests live in [`examples/`](examples/).
+targets. Tutorial manifests live in [`examples/`](examples/). Install and
+cgroup details: [`docs/install.md`](docs/install.md),
+[`docs/operations.md`](docs/operations.md).
 
 ## Bootstrap (install on a host)
 
@@ -49,8 +63,8 @@ bootstrap/
 ├── install.sh          # install.sh <ad-hoc|systemd|openrc>
 ├── uninstall.sh        # uninstall.sh <systemd|openrc> [--purge]
 ├── lib/common.sh
-├── systemd/imp.service
-└── openrc/imp
+├── systemd/imp.service # Delegate=yes; KillMode=process
+└── openrc/imp          # set IMP_CGROUP_ROOT for real limits
 ```
 
 | | ad-hoc | systemd | openrc |
@@ -59,6 +73,7 @@ bootstrap/
 | Runs as | you | `imp` (system user) | `imp` (system user) |
 | Paths | XDG under `$HOME` | FHS | FHS |
 | Supervised by | nothing (you) | systemd | OpenRC |
+| Cgroups | fake tree (no kernel limits) | `Delegate=yes` auto-detect | prepared `--cgroup-root` |
 | Purpose | dev / testing | production | production |
 
 ### ad-hoc
@@ -82,12 +97,15 @@ Add operators to group `imp`. Socket resolution for `impctl`: `--socket` flag �
 
 ## Contract: binaries vs install scripts
 
-- **`impd` is flags-only.** It reads `--socket`, `--data-dir`, `--manifest-dir`
-  (and `--log-level`). It does **not** read `IMP_*` env vars for paths — the
-  install scripts resolve dirs and pass flags. There is no `impd serve` subcommand.
+- **`impd` is flags-only.** Notable flags: `--socket`, `--data-dir`,
+  `--manifest-dir`, `--cgroup-root` (empty → auto-detect), `--metrics-addr`,
+  `--kill-procs-on-shutdown`, `--event-ttl`, `--log-level`. It does **not**
+  read `IMP_*` env vars for paths — the install scripts resolve dirs and pass
+  flags.
 - **`impctl`** uses `--socket` / `IMP_SOCKET` to find the API.
-- On SIGTERM, impd drains Procs (stopSignal → grace → SIGKILL) then exits.
-  Init systems should signal impd only (`KillMode=process` / equivalent).
+- Default stop **leaves Procs running** for re-attach; init systems should
+  signal impd only (`KillMode=process` / equivalent). Ad-hoc passes
+  `--kill-procs-on-shutdown` so Ctrl-C tears workloads down.
 
 ## Uninstall
 

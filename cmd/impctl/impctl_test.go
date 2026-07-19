@@ -215,6 +215,43 @@ spec:
 	}
 }
 
+func TestDescribeDaemonShowsSections(t *testing.T) {
+	socket := startServer(t)
+	manifest := writeManifest(t, `
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: web
+spec:
+  replicas: 1
+  template:
+    spec:
+      command: ["/bin/sleep", "60"]
+`)
+	impctl(t, socket, false, "apply", "-f", manifest)
+	out := impctl(t, socket, false, "describe", "daemon", "web")
+	for _, want := range []string{
+		"Name:\tweb",
+		"Conditions:",
+		"Events:",
+		"ObservedGeneration:",
+		"Command:\t/bin/sleep 60",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("describe missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestEventsForFilter(t *testing.T) {
+	socket := startServer(t)
+	out := impctl(t, socket, false, "events")
+	if !strings.Contains(out, "No resources found") {
+		t.Errorf("events empty output:\n%s", out)
+	}
+	impctl(t, socket, true, "events", "--for", "not-a-ref")
+}
+
 func TestHumanDuration(t *testing.T) {
 	cases := []struct {
 		d    string

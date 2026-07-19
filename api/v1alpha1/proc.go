@@ -35,14 +35,17 @@ const (
 // ProcTemplateSpec is the process definition, shared verbatim between a
 // Daemon's template and a Proc's spec
 type ProcTemplateSpec struct {
-	Command                       []string      `json:"command"`
-	Env                           []EnvVar      `json:"env,omitempty"`
-	WorkingDir                    string        `json:"workingDir,omitempty"`
-	User                          string        `json:"user,omitempty"`
-	Group                         string        `json:"group,omitempty"`
-	RestartPolicy                 RestartPolicy `json:"restartPolicy,omitempty"`
-	StopSignal                    string        `json:"stopSignal,omitempty"`
-	TerminationGracePeriodSeconds *int64        `json:"terminationGracePeriodSeconds,omitempty"`
+	Command                       []string             `json:"command"`
+	Env                           []EnvVar             `json:"env,omitempty"`
+	WorkingDir                    string               `json:"workingDir,omitempty"`
+	User                          string               `json:"user,omitempty"`
+	Group                         string               `json:"group,omitempty"`
+	RestartPolicy                 RestartPolicy        `json:"restartPolicy,omitempty"`
+	StopSignal                    string               `json:"stopSignal,omitempty"`
+	TerminationGracePeriodSeconds *int64               `json:"terminationGracePeriodSeconds,omitempty"`
+	Resources                     ResourceRequirements `json:"resources,omitzero"`
+	LivenessProbe                 *Probe               `json:"livenessProbe,omitempty"`
+	ReadinessProbe                *Probe               `json:"readinessProbe,omitempty"`
 }
 
 type ProcPhase string

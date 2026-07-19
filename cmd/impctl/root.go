@@ -40,6 +40,8 @@ the access model.`,
 		newGetCmd(newClient),
 		newApplyCmd(newClient),
 		newDeleteCmd(newClient),
+		newDescribeCmd(newClient),
+		newEventsCmd(newClient),
 		newLogsCmd(newClient),
 		newVersionCmd(newClient),
 	)

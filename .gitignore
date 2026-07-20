@@ -136,3 +136,7 @@ vendordiff.patch
 bin/
 dist/
 coverage.out
+# stray root-level binaries (e.g. `go build -o impctl ./cmd/impctl`); anchored
+# so they never match the cmd/impctl and cmd/impd source directories
+/impctl
+/impd

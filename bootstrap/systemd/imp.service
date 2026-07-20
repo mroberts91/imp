@@ -71,9 +71,14 @@ ProtectSystem=true
 # ProtectKernelTunables=true
 # ProtectControlGroups=true   # do NOT enable — blocks Delegate= / cgroup management
 
-# --- Multi-user supervision hook (DISABLED: this is the single-user build) -
-# To let imp run Procs as OTHER users later, impd must be able to switch
-# credentials (setuid/setgid on exec), which is privileged. Then:
+# --- Multi-user supervision ------------------------------------------------
+# To let imp run Procs as OTHER users with the full sandbox (user:,
+# capabilities, privateTmp, filesystem), use the privileged install
+# (install.sh --privileged, M10-c): it writes a drop-in that lifts this unit
+# to root and resets the inherited-confinement lines above — per-Proc
+# sandboxing becomes imp's job. The narrower alternative below grants only
+# the identity switch (no mount namespaces, so privateTmp/filesystem still
+# fail honestly):
 #   1. delete "NoNewPrivileges=true" above (it blocks privilege changes)
 #   2. uncomment the two lines below to grant just those capabilities:
 # AmbientCapabilities=CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_DAC_READ_SEARCH

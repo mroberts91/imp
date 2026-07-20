@@ -96,6 +96,13 @@ type ProcTemplateSpec struct {
 	// Nil-default — never materialized by defaulting, so a daemon without
 	// config refs keeps its pre-M8 template hash and does not roll on upgrade.
 	Configs []ConfigRef `json:"configs,omitempty"`
+	// Filesystem constrains the process's view of the filesystem via a
+	// private mount namespace (M10-b). Needs a privileged impd; rootless the
+	// mount calls fail EPERM into the exit-126 path (the M7 honesty pattern:
+	// the Proc crash-loops with the reason one `impctl logs` away rather than
+	// silently running unconfined). Nil = unconfined; nil-default, so
+	// pre-M10 template hashes stay stable.
+	Filesystem *FilesystemPolicy `json:"filesystem,omitempty"`
 }
 
 // ConfigRef references a Config from a template. In YAML/JSON it is either a
@@ -163,6 +170,24 @@ type Capabilities struct {
 	Ambient []string `json:"ambient,omitempty"`
 }
 
+// FilesystemPolicy is the M10-b filesystem sandbox: systemd
+// ProtectSystem=strict / ProtectHome= semantics, expressed as one block.
+type FilesystemPolicy struct {
+	// ReadOnlyRoot remounts every mount read-only — the whole tree, not
+	// just the root mount, so a separate-filesystem /var goes read-only
+	// too — except /dev, /proc, /sys, /run, private tmpfs mounts
+	// (privateTmp, protectHome), and ReadWritePaths.
+	ReadOnlyRoot *bool `json:"readOnlyRoot,omitempty"`
+	// ProtectHome hides /home, /root, and /run/user behind empty
+	// mode-000 read-only tmpfs mounts (the systemd ProtectHome=true
+	// "inaccessible" flavor).
+	ProtectHome *bool `json:"protectHome,omitempty"`
+	// ReadWritePaths lists absolute directories that stay writable under
+	// ReadOnlyRoot (self-bind-mounted read-write before the read-only
+	// sweep). A listed path must exist at spawn.
+	ReadWritePaths []string `json:"readWritePaths,omitempty"`
+}
+
 // Rlimit sets one resource limit for the process. When only one of
 // soft/hard is given, both are set to that value (systemd LimitNOFILE=
 // semantics); -1 means unlimited (RLIM_INFINITY).
@@ -221,6 +246,13 @@ type ProcState struct {
 	Waiting    *ProcStateWaiting    `json:"waiting,omitempty"`
 	Running    *ProcStateRunning    `json:"running,omitempty"`
 	Terminated *ProcStateTerminated `json:"terminated,omitempty"`
+	// LastTerminated is the previous exit's detail while the Proc is not
+	// currently Terminated — populated during CrashLoopBackOff waits and
+	// across restarts, so the exit code survives into status instead of
+	// living only in execd's memory (M10-e; fork of core/v1
+	// ContainerStatus.LastTerminationState). Nil until the first observed
+	// exit — adopted Procs (D1) carry nothing until one is observed.
+	LastTerminated *ProcStateTerminated `json:"lastTerminated,omitempty"`
 }
 
 // ProcStateWaiting means no process is running and execd is deciding or

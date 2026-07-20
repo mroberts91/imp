@@ -893,3 +893,195 @@ func TestValidateLogRetention(t *testing.T) {
 		t.Errorf("valid logRetention rejected: %v", errs.ToAggregate())
 	}
 }
+
+func validNotifier() *Notifier {
+	n := &Notifier{
+		TypeMeta: TypeMeta{APIVersion: APIVersion, Kind: KindNotifier},
+		Metadata: ObjectMeta{Name: "default"},
+		Spec: NotifierSpec{
+			Template: ProcTemplate{
+				Spec: ProcTemplateSpec{Command: []string{"/usr/local/bin/notify"}},
+			},
+		},
+	}
+	DefaultNotifier(n)
+	return n
+}
+
+func TestValidateNotifier(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*Notifier)
+		wantFields []string
+	}{
+		{
+			name:   "valid",
+			mutate: func(*Notifier) {},
+		},
+		{
+			name:   "valid selector",
+			mutate: func(n *Notifier) { n.Spec.Selector = "app=web,tier!=db" },
+		},
+		{
+			name:       "malformed selector",
+			mutate:     func(n *Notifier) { n.Spec.Selector = "app" },
+			wantFields: []string{"spec.selector"},
+		},
+		{
+			name:       "selector with empty key",
+			mutate:     func(n *Notifier) { n.Spec.Selector = "=web" },
+			wantFields: []string{"spec.selector"},
+		},
+		{
+			name:       "negative cooldown",
+			mutate:     func(n *Notifier) { n.Spec.CooldownSeconds = new(int32(-1)) },
+			wantFields: []string{"spec.cooldownSeconds"},
+		},
+		{
+			name:       "zero minRestarts",
+			mutate:     func(n *Notifier) { n.Spec.MinRestarts = new(int32(0)) },
+			wantFields: []string{"spec.minRestarts"},
+		},
+		{
+			name:       "zero historyLimit",
+			mutate:     func(n *Notifier) { n.Spec.HistoryLimit = new(int32(0)) },
+			wantFields: []string{"spec.historyLimit"},
+		},
+		{
+			// Unlike Timer, OnFailure is also rejected: the cooldown expiring
+			// is the retry, never the run itself (M10-a2).
+			name:       "restartPolicy OnFailure rejected",
+			mutate:     func(n *Notifier) { n.Spec.Template.Spec.RestartPolicy = RestartPolicyOnFailure },
+			wantFields: []string{"spec.template.spec.restartPolicy"},
+		},
+		{
+			name:       "restartPolicy Always rejected",
+			mutate:     func(n *Notifier) { n.Spec.Template.Spec.RestartPolicy = RestartPolicyAlways },
+			wantFields: []string{"spec.template.spec.restartPolicy"},
+		},
+		{
+			name:       "missing command",
+			mutate:     func(n *Notifier) { n.Spec.Template.Spec.Command = nil },
+			wantFields: []string{"spec.template.spec.command"},
+		},
+		{
+			name:       "bad template label",
+			mutate:     func(n *Notifier) { n.Spec.Template.Metadata.Labels = map[string]string{"-bad": "x"} },
+			wantFields: []string{"spec.template.metadata.labels[-bad]"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			n := validNotifier()
+			tc.mutate(n)
+			errs := ValidateNotifier(n)
+			var gotFields []string
+			for _, e := range errs {
+				gotFields = append(gotFields, e.Field)
+			}
+			if len(gotFields) != len(tc.wantFields) {
+				t.Fatalf("got %d errors %v, want fields %v\nerrors: %v",
+					len(errs), gotFields, tc.wantFields, errs.ToAggregate())
+			}
+			for i, want := range tc.wantFields {
+				if gotFields[i] != want {
+					t.Errorf("error[%d].Field = %q, want %q", i, gotFields[i], want)
+				}
+			}
+			if len(tc.wantFields) == 0 && errs.ToAggregate() != nil {
+				t.Errorf("ToAggregate() = %v, want nil", errs.ToAggregate())
+			}
+		})
+	}
+}
+
+func TestValidateFilesystemPolicy(t *testing.T) {
+	const fsField = "spec.template.spec.filesystem"
+	cases := []struct {
+		name       string
+		policy     *FilesystemPolicy
+		wantFields []string
+	}{
+		{
+			name: "strict with carve-outs",
+			policy: &FilesystemPolicy{
+				ReadOnlyRoot:   new(true),
+				ReadWritePaths: []string{"/var/lib/app", "/var/log/app"},
+			},
+		},
+		{
+			name:   "protectHome only",
+			policy: &FilesystemPolicy{ProtectHome: new(true)},
+		},
+		{
+			name:       "empty block confines nothing",
+			policy:     &FilesystemPolicy{},
+			wantFields: []string{fsField},
+		},
+		{
+			name:       "both explicitly false confines nothing",
+			policy:     &FilesystemPolicy{ReadOnlyRoot: new(false), ProtectHome: new(false)},
+			wantFields: []string{fsField},
+		},
+		{
+			name: "readWritePaths without readOnlyRoot",
+			policy: &FilesystemPolicy{
+				ProtectHome:    new(true),
+				ReadWritePaths: []string{"/var/lib/app"},
+			},
+			wantFields: []string{fsField + ".readWritePaths"},
+		},
+		{
+			name: "relative path",
+			policy: &FilesystemPolicy{
+				ReadOnlyRoot:   new(true),
+				ReadWritePaths: []string{"var/lib/app"},
+			},
+			wantFields: []string{fsField + ".readWritePaths[0]"},
+		},
+		{
+			name: "unclean path",
+			policy: &FilesystemPolicy{
+				ReadOnlyRoot:   new(true),
+				ReadWritePaths: []string{"/var/lib/../lib/app"},
+			},
+			wantFields: []string{fsField + ".readWritePaths[0]"},
+		},
+		{
+			name: "root as carve-out",
+			policy: &FilesystemPolicy{
+				ReadOnlyRoot:   new(true),
+				ReadWritePaths: []string{"/"},
+			},
+			wantFields: []string{fsField + ".readWritePaths[0]"},
+		},
+		{
+			name: "duplicate carve-out",
+			policy: &FilesystemPolicy{
+				ReadOnlyRoot:   new(true),
+				ReadWritePaths: []string{"/var/lib/app", "/var/lib/app"},
+			},
+			wantFields: []string{fsField + ".readWritePaths[1]"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := validDaemon()
+			d.Spec.Template.Spec.Filesystem = tc.policy
+			errs := ValidateDaemon(d)
+			var gotFields []string
+			for _, e := range errs {
+				gotFields = append(gotFields, e.Field)
+			}
+			if len(gotFields) != len(tc.wantFields) {
+				t.Fatalf("got %d errors %v, want fields %v\nerrors: %v",
+					len(errs), gotFields, tc.wantFields, errs.ToAggregate())
+			}
+			for i, want := range tc.wantFields {
+				if gotFields[i] != want {
+					t.Errorf("error[%d].Field = %q, want %q", i, gotFields[i], want)
+				}
+			}
+		})
+	}
+}

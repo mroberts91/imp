@@ -57,3 +57,73 @@ func TestReadyConditionStartupGate(t *testing.T) {
 		})
 	}
 }
+
+// TestStatusLastTerminated pins the M10-e projection: once an exit has been
+// observed, its detail survives into status alongside the Waiting (backoff)
+// and Running (restarted) states instead of living only in this worker's
+// memory. The Terminated branch deliberately stays nil-LastTerminated (the
+// exit detail is already the state itself), and a Proc with no observed
+// exit — including a D1-adopted one — carries nothing.
+func TestStatusLastTerminated(t *testing.T) {
+	exit := &ExitInfo{
+		ExitCode:   new(7),
+		FinishedAt: time.Unix(2000, 0).UTC(),
+		Message:    "exit status 7",
+		Nonzero:    true,
+	}
+
+	t.Run("backoff carries last exit", func(t *testing.T) {
+		rt := RuntimeRecord{
+			StartedOnce:  true,
+			LastExit:     exit,
+			BackoffUntil: time.Unix(3000, 0).UTC(),
+			RestartCount: 4,
+		}
+		_, state := statusFromRuntime(&rt, v1alpha1.RestartPolicyAlways)
+		if state.Waiting == nil || state.Waiting.Reason != v1alpha1.WaitingReasonCrashLoopBackOff {
+			t.Fatalf("state = %+v, want CrashLoopBackOff waiting", state)
+		}
+		lt := state.LastTerminated
+		if lt == nil || lt.ExitCode == nil || *lt.ExitCode != 7 {
+			t.Fatalf("LastTerminated = %+v, want exit code 7", lt)
+		}
+		if lt.Message != "exited with code 7" {
+			t.Errorf("Message = %q, want %q", lt.Message, "exited with code 7")
+		}
+	})
+
+	t.Run("running after restart carries last exit", func(t *testing.T) {
+		rt := RuntimeRecord{
+			Running:     true,
+			PID:         42,
+			StartedOnce: true,
+			LastExit:    exit,
+		}
+		phase, state := statusFromRuntime(&rt, v1alpha1.RestartPolicyAlways)
+		if phase != v1alpha1.ProcPhaseRunning || state.Running == nil {
+			t.Fatalf("phase/state = %s/%+v, want Running", phase, state)
+		}
+		if state.LastTerminated == nil || *state.LastTerminated.ExitCode != 7 {
+			t.Fatalf("LastTerminated = %+v, want exit code 7", state.LastTerminated)
+		}
+	})
+
+	t.Run("no exit observed carries nothing", func(t *testing.T) {
+		rt := RuntimeRecord{Running: true, PID: 42}
+		_, state := statusFromRuntime(&rt, v1alpha1.RestartPolicyAlways)
+		if state.LastTerminated != nil {
+			t.Errorf("LastTerminated = %+v, want nil (D1-adopted / first run)", state.LastTerminated)
+		}
+	})
+
+	t.Run("terminated branch leaves lastTerminated nil", func(t *testing.T) {
+		rt := RuntimeRecord{StartedOnce: true, LastExit: exit}
+		phase, state := statusFromRuntime(&rt, v1alpha1.RestartPolicyNever)
+		if phase != v1alpha1.ProcPhaseFailed || state.Terminated == nil {
+			t.Fatalf("phase/state = %s/%+v, want Failed/Terminated", phase, state)
+		}
+		if state.LastTerminated != nil {
+			t.Errorf("LastTerminated duplicated alongside Terminated: %+v", state.LastTerminated)
+		}
+	})
+}

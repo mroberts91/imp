@@ -65,8 +65,10 @@ func resolveKindArg(arg string) (string, error) {
 		return v1alpha1.KindTimer, nil
 	case "config", "configs":
 		return v1alpha1.KindConfig, nil
+	case "notifier", "notifiers":
+		return v1alpha1.KindNotifier, nil
 	default:
-		return "", fmt.Errorf("unknown resource type %q (use daemon, proc, event, timer, or config)", arg)
+		return "", fmt.Errorf("unknown resource type %q (use daemon, proc, event, timer, config, or notifier)", arg)
 	}
 }
 

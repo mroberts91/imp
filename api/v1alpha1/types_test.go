@@ -66,6 +66,11 @@ func fullDaemon() *Daemon {
 					},
 					PrivateTmp: new(true),
 					Configs:    []ConfigRef{{Name: "app"}, {Name: "shared", Path: new("/etc/shared")}},
+					Filesystem: &FilesystemPolicy{
+						ReadOnlyRoot:   new(true),
+						ProtectHome:    new(true),
+						ReadWritePaths: []string{"/var/lib/web"},
+					},
 					LivenessProbe: &Probe{
 						Exec:                &ExecAction{Command: []string{"/bin/true"}},
 						InitialDelaySeconds: 2,
@@ -145,11 +150,18 @@ func fullProc() *Proc {
 		},
 		Status: ProcStatus{
 			Phase: ProcPhaseRunning,
-			State: ProcState{Running: &ProcStateRunning{
-				PID:            4242,
-				StartedAt:      NewTime(time.Date(2026, 7, 10, 12, 1, 5, 0, time.UTC)),
-				ProcStartTicks: 123456789,
-			}},
+			State: ProcState{
+				Running: &ProcStateRunning{
+					PID:            4242,
+					StartedAt:      NewTime(time.Date(2026, 7, 10, 12, 1, 5, 0, time.UTC)),
+					ProcStartTicks: 123456789,
+				},
+				LastTerminated: &ProcStateTerminated{
+					ExitCode:   new(7),
+					FinishedAt: NewTime(time.Date(2026, 7, 10, 12, 1, 0, 0, time.UTC)),
+					Message:    "exit status 7",
+				},
+			},
 			RestartCount: 2,
 			Conditions: []Condition{{
 				Type:               ConditionTypeReady,
@@ -209,7 +221,7 @@ func fullConfig() *Config {
 // sweep) automatically covers a newly added kind.
 func TestAllKinds(t *testing.T) {
 	got := AllKinds()
-	want := []string{KindConfig, KindDaemon, KindEvent, KindProc, KindTimer} // sorted
+	want := []string{KindConfig, KindDaemon, KindEvent, KindNotifier, KindProc, KindTimer} // sorted
 	if !slices.Equal(got, want) {
 		t.Errorf("AllKinds() = %v, want %v", got, want)
 	}
@@ -217,6 +229,48 @@ func TestAllKinds(t *testing.T) {
 		if !IsValidKind(k) {
 			t.Errorf("AllKinds() reported %q, which IsValidKind rejects", k)
 		}
+	}
+}
+
+func fullNotifier() *Notifier {
+	return &Notifier{
+		TypeMeta: TypeMeta{APIVersion: APIVersion, Kind: KindNotifier},
+		Metadata: ObjectMeta{
+			Name:              "default",
+			UID:               "8e7d3f22-91c4-4b8a-b0e3-55a1d9b6c001",
+			ResourceVersion:   "99",
+			Generation:        2,
+			CreationTimestamp: NewTime(time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)),
+			Labels:            map[string]string{"channel": "ntfy"},
+		},
+		Spec: NotifierSpec{
+			Template: ProcTemplate{
+				Metadata: TemplateMeta{Labels: map[string]string{"channel": "ntfy"}},
+				Spec: ProcTemplateSpec{
+					Command:                       []string{"/usr/local/bin/ft", "alert", "--level", "page"},
+					Env:                           []EnvVar{{Name: "FT_NTFY_TOPIC", Value: "ops"}},
+					RestartPolicy:                 RestartPolicyNever,
+					StopSignal:                    "TERM",
+					TerminationGracePeriodSeconds: new(DefaultTerminationGracePeriodSeconds),
+				},
+			},
+			CooldownSeconds: new(int32(300)),
+			MinRestarts:     new(int32(2)),
+			HistoryLimit:    new(int32(10)),
+			Selector:        "app=web,tier!=db",
+		},
+		Status: NotifierStatus{
+			ObservedGeneration:   2,
+			LastNotificationTime: NewTime(time.Date(2026, 7, 10, 12, 30, 0, 0, time.UTC)),
+			Conditions: []Condition{{
+				Type:               ConditionTypeReady,
+				Status:             ConditionTrue,
+				ObservedGeneration: 2,
+				LastTransitionTime: NewTime(time.Date(2026, 7, 10, 12, 0, 5, 0, time.UTC)),
+				Reason:             "Idle",
+				Message:            "no failure signals",
+			}},
+		},
 	}
 }
 
@@ -230,6 +284,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		{"Proc", fullProc(), func() any { return &Proc{} }},
 		{"Event", fullEvent(), func() any { return &Event{} }},
 		{"Config", fullConfig(), func() any { return &Config{} }},
+		{"Notifier", fullNotifier(), func() any { return &Notifier{} }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

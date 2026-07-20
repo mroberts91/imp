@@ -16,8 +16,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -26,11 +28,12 @@ import (
 )
 
 var kindByPlural = map[string]string{
-	"daemons": v1alpha1.KindDaemon,
-	"procs":   v1alpha1.KindProc,
-	"events":  v1alpha1.KindEvent,
-	"timers":  v1alpha1.KindTimer,
-	"configs": v1alpha1.KindConfig,
+	"daemons":   v1alpha1.KindDaemon,
+	"procs":     v1alpha1.KindProc,
+	"events":    v1alpha1.KindEvent,
+	"timers":    v1alpha1.KindTimer,
+	"configs":   v1alpha1.KindConfig,
+	"notifiers": v1alpha1.KindNotifier,
 }
 
 type Config struct {
@@ -112,6 +115,25 @@ func Listen(socketPath string) (net.Listener, error) {
 		return nil, fmt.Errorf("apiserver: setting socket permissions: %w", err)
 	}
 	return l, nil
+}
+
+// SetSocketGroup chgrps the listening socket to the named group (M10-c2):
+// under a root impd the socket would otherwise be root:root, locking
+// impctl to sudo. Listen's 0660 already grants the group; this points the
+// group bit at the operators. Called only when --socket-group is set.
+func SetSocketGroup(socketPath, group string) error {
+	g, err := user.LookupGroup(group)
+	if err != nil {
+		return fmt.Errorf("apiserver: looking up socket group %q: %w", group, err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return fmt.Errorf("apiserver: parsing gid for group %q: %w", group, err)
+	}
+	if err := os.Chown(socketPath, -1, gid); err != nil {
+		return fmt.Errorf("apiserver: chgrp %s to %s: %w", socketPath, group, err)
+	}
+	return nil
 }
 
 // resolveKind maps the {kinds} path segment. Unknown resources are 404s.

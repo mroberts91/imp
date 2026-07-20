@@ -29,6 +29,11 @@ description="Declarative single-host process orchestrator"
 # Optional: writable cgroup v2 path (e.g. /sys/fs/cgroup/imp). Required for
 # OpenRC unless auto-detect finds a usable self cgroup (unusual without systemd).
 : "${IMP_CGROUP_ROOT:=}"
+# IMP_PRIVILEGED=1 (install.sh --privileged, M10-c): impd runs as root and
+# drops each Proc to its spec'd user itself, with the full sandbox
+# (capabilities, privateTmp, filesystem) enforced. The socket stays
+# impctl-usable by the ${IMP_GROUP} group via --socket-group.
+: "${IMP_PRIVILEGED:=0}"
 
 command="${IMP_BIN_DIR}/impd"
 command_args="--socket ${IMP_SOCKET} --data-dir ${IMP_DATA_DIR} --manifest-dir ${IMP_MANIFEST_DIR}"
@@ -36,8 +41,12 @@ if [ -n "${IMP_CGROUP_ROOT}" ]; then
     command_args="${command_args} --cgroup-root ${IMP_CGROUP_ROOT}"
 fi
 
-# Drop privileges to the unprivileged service user (single-user model).
-command_user="${IMP_USER}:${IMP_GROUP}"
+if [ "${IMP_PRIVILEGED}" = 1 ]; then
+    command_args="${command_args} --socket-group ${IMP_GROUP}"
+else
+    # Drop privileges to the unprivileged service user (single-user model).
+    command_user="${IMP_USER}:${IMP_GROUP}"
+fi
 
 # Supervise impd with supervise-daemon so a crash respawns it. impd's panic
 # policy is crash-only (doc 05 §3): unexpected panics kill the process on
@@ -79,11 +88,11 @@ start_pre() {
         --owner "${IMP_USER}:${IMP_GROUP}" "${IMP_LOG_FILE}"
 }
 
-# --- Multi-user supervision hook (DISABLED: single-user build) -------------
+# --- Multi-user supervision ------------------------------------------------
 # OpenRC cannot grant ambient capabilities the way systemd does. To run Procs
-# as OTHER users later you must either:
-#   * run impd as root and let it drop to each Proc's user itself (remove
-#     command_user above), or
-#   * grant file capabilities on the binary:
+# as OTHER users, use the privileged mode (install.sh --privileged, which
+# sets IMP_PRIVILEGED=1 above): impd runs as root and drops to each Proc's
+# user itself. The setcap alternative
 #       setcap cap_setuid,cap_setgid+ep /usr/local/bin/impd
-#     (re-applied on every upgrade, since replacing the binary clears caps).
+# grants only the identity switch — not the mount namespaces privateTmp and
+# filesystem need — and is cleared on every binary upgrade.

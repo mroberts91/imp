@@ -51,6 +51,16 @@ func buildCmd(p *v1alpha1.Proc, configDir string, stdout, stderr io.Writer) (*ex
 	if err := childsetup.CheckIdentity(p.Spec.User, p.Spec.Group); err != nil {
 		return nil, fmt.Errorf("proc %s: %w", p.Metadata.Name, err)
 	}
+	// Same treatment for filesystem carve-outs (M10-b): a missing
+	// readWritePath is a clean start error; the shim still fails honestly
+	// if the path vanishes between here and the bind.
+	if fs := p.Spec.Filesystem; fs != nil {
+		for _, rw := range fs.ReadWritePaths {
+			if _, err := os.Stat(rw); err != nil {
+				return nil, fmt.Errorf("proc %s: readWritePath: %w", p.Metadata.Name, err)
+			}
+		}
+	}
 	payload := childsetup.Payload{
 		Exe:             exe,
 		Argv:            p.Spec.Command,
@@ -63,6 +73,7 @@ func buildCmd(p *v1alpha1.Proc, configDir string, stdout, stderr io.Writer) (*ex
 		NoNewPrivileges: p.Spec.NoNewPrivileges,
 		Capabilities:    p.Spec.Capabilities,
 		PrivateTmp:      p.Spec.PrivateTmp,
+		Filesystem:      p.Spec.Filesystem,
 	}
 	entry, err := payload.EnvEntry()
 	if err != nil {

@@ -37,6 +37,11 @@ Modes:
 Options (system modes):
   --start        enable and start the service after installing
   --bin-dir DIR  where to install impd/impctl (default: $IMP_BIN_DIR)
+  --privileged   run impd as root (M10-c): full sandbox enforcement
+                 (user:/privateTmp/capabilities/filesystem) with every Proc
+                 dropped per its spec. The '$IMP_USER' group remains the
+                 impctl socket-access group. Default: unprivileged
+                 single-user model.
 
 Options (ad-hoc):
   --run          exec impd in the foreground after creating dirs
@@ -189,8 +194,38 @@ IMP_RUN_DIR="${IMP_RUN_DIR}"
 IMP_SOCKET="${IMP_SOCKET}"
 IMP_LOG_FILE="${IMP_LOG_DIR}/impd.log"
 IMP_CGROUP_ROOT="${IMP_CGROUP_ROOT}"
+IMP_PRIVILEGED="${IMP_PRIVILEGED}"
 EOF
     log "config /etc/conf.d/imp (custom config)"
+}
+
+# write_systemd_privileged_dropin lifts the unit to root (M10-c1). A drop-in
+# rather than a unit edit so the base file stays pristine; it sorts after
+# override.conf, so its ExecStart (composed from the same IMP_* values) wins
+# either way. The unit-level sandbox lines are reset because they are
+# inherited by every Proc and would shadow imp's own per-Proc sandbox —
+# which is the whole point of the privileged mode.
+write_systemd_privileged_dropin() {
+    mkdir -p /etc/systemd/system/imp.service.d
+    cat > /etc/systemd/system/imp.service.d/privileged.conf <<EOF
+# Written by bootstrap/install.sh --privileged. Re-running the installer
+# without --privileged removes this file.
+[Service]
+User=root
+Group=root
+# Per-Proc sandboxing (user:, capabilities, privateTmp, filesystem) is
+# imp's job in this mode; unit-level confinement would be inherited by
+# every Proc and fight it.
+NoNewPrivileges=no
+ProtectHome=no
+ProtectSystem=no
+# Root-owned /run/imp must stay traversable for the '${IMP_GROUP}' group to
+# reach the socket (which --socket-group keeps group-accessible, 0660).
+RuntimeDirectoryMode=0755
+ExecStart=
+ExecStart=${IMP_BIN_DIR}/impd --socket ${IMP_SOCKET} --data-dir ${IMP_DATA_DIR} --manifest-dir ${IMP_MANIFEST_DIR} --socket-group ${IMP_GROUP}
+EOF
+    log "drop-in /etc/systemd/system/imp.service.d/privileged.conf (root impd)"
 }
 
 # prepare_openrc_cgroup creates a dedicated cgroup v2 directory for the imp
@@ -241,9 +276,10 @@ cmd_systemd() {
     local do_start=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --start)   do_start=1 ;;
-            --bin-dir) IMP_BIN_DIR="$2"; shift ;;
-            -h|--help) usage 0 ;;
+            --start)      do_start=1 ;;
+            --bin-dir)    IMP_BIN_DIR="$2"; shift ;;
+            --privileged) IMP_PRIVILEGED=1 ;;
+            -h|--help)    usage 0 ;;
             *) die "unknown systemd option: $1" ;;
         esac
         shift
@@ -257,6 +293,13 @@ cmd_systemd() {
     log "unit /etc/systemd/system/imp.service"
     if config_customized; then
         write_systemd_dropin
+    fi
+    if [ "$IMP_PRIVILEGED" = 1 ]; then
+        write_systemd_privileged_dropin
+    else
+        # A re-run without --privileged is a downgrade: drop back to the
+        # unprivileged single-user model.
+        rm -f /etc/systemd/system/imp.service.d/privileged.conf
     fi
     systemctl daemon-reload
 
@@ -280,9 +323,10 @@ cmd_openrc() {
     local do_start=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --start)   do_start=1 ;;
-            --bin-dir) IMP_BIN_DIR="$2"; shift ;;
-            -h|--help) usage 0 ;;
+            --start)      do_start=1 ;;
+            --bin-dir)    IMP_BIN_DIR="$2"; shift ;;
+            --privileged) IMP_PRIVILEGED=1 ;;
+            -h|--help)    usage 0 ;;
             *) die "unknown openrc option: $1" ;;
         esac
         shift
@@ -295,8 +339,10 @@ cmd_openrc() {
 
     install -m 0755 "$HERE/openrc/imp" /etc/init.d/imp
     log "init script /etc/init.d/imp"
-    # Always write conf.d when we have a cgroup root or custom paths.
-    if config_customized || [ -n "${IMP_CGROUP_ROOT}" ]; then
+    # Write conf.d when we have a cgroup root, custom paths, or the
+    # privileged mode; also when a previous conf.d exists (so a re-run
+    # without --privileged downgrades it honestly).
+    if config_customized || [ -n "${IMP_CGROUP_ROOT}" ] || [ "$IMP_PRIVILEGED" = 1 ] || [ -f /etc/conf.d/imp ]; then
         write_openrc_confd
     fi
 

@@ -19,6 +19,7 @@ func statusFromRuntime(rt *RuntimeRecord, policy v1alpha1.RestartPolicy) (phase 
 				StartedAt:      v1alpha1.NewTime(rt.StartedAt),
 				ProcStartTicks: rt.ProcStartTicks,
 			},
+			LastTerminated: lastTerminated(rt),
 		}
 	}
 
@@ -35,16 +36,12 @@ func statusFromRuntime(rt *RuntimeRecord, policy v1alpha1.RestartPolicy) (phase 
 				Message:      msg,
 				BackoffUntil: v1alpha1.NewTime(rt.BackoffUntil),
 			},
+			LastTerminated: lastTerminated(rt),
 		}
 	}
 
 	if rt.LastExit != nil {
-		term := &v1alpha1.ProcStateTerminated{
-			ExitCode:   rt.LastExit.ExitCode,
-			Signal:     rt.LastExit.Signal,
-			FinishedAt: v1alpha1.NewTime(rt.LastExit.FinishedAt),
-			Message:    fmtExitMessage(*rt.LastExit),
-		}
+		term := terminatedFrom(rt.LastExit)
 		if willRestart {
 			return v1alpha1.ProcPhasePending, v1alpha1.ProcState{Terminated: term}
 		}
@@ -55,6 +52,28 @@ func statusFromRuntime(rt *RuntimeRecord, policy v1alpha1.RestartPolicy) (phase 
 	}
 
 	return v1alpha1.ProcPhasePending, v1alpha1.ProcState{}
+}
+
+func terminatedFrom(exit *ExitInfo) *v1alpha1.ProcStateTerminated {
+	return &v1alpha1.ProcStateTerminated{
+		ExitCode:   exit.ExitCode,
+		Signal:     exit.Signal,
+		FinishedAt: v1alpha1.NewTime(exit.FinishedAt),
+		Message:    fmtExitMessage(*exit),
+	}
+}
+
+// lastTerminated projects the previous exit into status while the Proc is
+// Running or Waiting (M10-e) — before it, the exit code lived only in this
+// worker's memory during a CrashLoopBackOff, and the NotifierController's
+// IMP_NOTIFY_EXIT_CODE needs it from status. Nil until an exit is observed
+// (adopted Procs, D1). The current-Terminated branch deliberately stays
+// nil-LastTerminated: the exit detail is already the state itself.
+func lastTerminated(rt *RuntimeRecord) *v1alpha1.ProcStateTerminated {
+	if rt.LastExit == nil {
+		return nil
+	}
+	return terminatedFrom(rt.LastExit)
 }
 
 func shouldRestart(policy v1alpha1.RestartPolicy, exit *ExitInfo) bool {

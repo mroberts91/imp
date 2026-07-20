@@ -145,7 +145,7 @@ func TestReconcileDeletesOrphansAfterDaemonDelete(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), startInformer(t, c, v1alpha1.KindNotifier).Store(), pInf.Store())
 
 	if err := c.DeleteDaemon(ctx, "web"); err != nil {
 		t.Fatalf("DeleteDaemon: %v", err)
@@ -173,7 +173,7 @@ func TestReconcileLeavesProcWithLiveOwner(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), startInformer(t, c, v1alpha1.KindNotifier).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/"+p.Metadata.Name); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -196,7 +196,7 @@ func TestReconcileIgnoresUnownedProc(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), startInformer(t, c, v1alpha1.KindNotifier).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/loner"); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -217,7 +217,7 @@ func TestReconcileFreshnessCheckSavesProcFromStaleCache(t *testing.T) {
 	// daemon. The live GetDaemon in the freshness check must save the proc.
 	staleDaemons := cache.NewInformer(c, v1alpha1.KindDaemon, func(string) {}, nil)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, staleDaemons.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
+	ctrl := gc.New(c, staleDaemons.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), startInformer(t, c, v1alpha1.KindNotifier).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/"+p.Metadata.Name); err != nil {
 		t.Fatalf("Reconcile: %v", err)
@@ -275,7 +275,7 @@ func TestReconcileAbsentProcKeyIsNoop(t *testing.T) {
 
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), startInformer(t, c, v1alpha1.KindTimer).Store(), startInformer(t, c, v1alpha1.KindNotifier).Store(), pInf.Store())
 
 	if err := ctrl.Reconcile(t.Context(), "Proc/ghost"); err != nil {
 		t.Fatalf("Reconcile of absent key = %v, want nil", err)
@@ -319,7 +319,7 @@ func TestReconcileDeletesTimerOrphans(t *testing.T) {
 	dInf := startInformer(t, c, v1alpha1.KindDaemon)
 	tInf := startInformer(t, c, v1alpha1.KindTimer)
 	pInf := startInformer(t, c, v1alpha1.KindProc)
-	ctrl := gc.New(c, dInf.Store(), tInf.Store(), pInf.Store())
+	ctrl := gc.New(c, dInf.Store(), tInf.Store(), startInformer(t, c, v1alpha1.KindNotifier).Store(), pInf.Store())
 
 	// Owner alive: untouched.
 	if err := ctrl.Reconcile(ctx, "Proc/"+run.Metadata.Name); err != nil {

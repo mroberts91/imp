@@ -14,19 +14,21 @@ const (
 )
 
 const (
-	KindDaemon = "Daemon"
-	KindProc   = "Proc"
-	KindEvent  = "Event"
-	KindTimer  = "Timer"
-	KindConfig = "Config"
+	KindDaemon   = "Daemon"
+	KindProc     = "Proc"
+	KindEvent    = "Event"
+	KindTimer    = "Timer"
+	KindConfig   = "Config"
+	KindNotifier = "Notifier"
 )
 
 var allowedKids = map[string]struct{}{
-	KindDaemon: {},
-	KindProc:   {},
-	KindEvent:  {},
-	KindTimer:  {},
-	KindConfig: {},
+	KindDaemon:   {},
+	KindProc:     {},
+	KindEvent:    {},
+	KindTimer:    {},
+	KindConfig:   {},
+	KindNotifier: {},
 }
 
 // AllKinds returns every registered kind, sorted. Use it where code must act
@@ -58,8 +60,21 @@ const (
 	// AnnotationManual marks a Timer run created by `impctl run` rather than
 	// the schedule. Manual runs never advance status.lastScheduleTime but do
 	// count as active for concurrencyPolicy.
-	AnnotationManual  = "impd.sh/manual"
-	ManagedByManifest = "manifest"
+	AnnotationManual = "impd.sh/manual"
+	// LabelNotifierName marks a notification run with the Notifier that
+	// created it (M10-a). Its presence also excludes the Proc from the
+	// failure-signal scan — a failing notification never breeds another
+	// notification (no meta-alerting, M10-a6).
+	LabelNotifierName = "impd.sh/notifier-name"
+	// AnnotationNotified* record a notification run's target — the dedup
+	// key (target UID, reason) plus the human-facing kind/name (M10-a4).
+	// The cooldown state IS these annotations on the run history: stateless,
+	// restart-safe, inspectable.
+	AnnotationNotifiedKind   = "impd.sh/notified-kind"
+	AnnotationNotifiedName   = "impd.sh/notified-name"
+	AnnotationNotifiedUID    = "impd.sh/notified-uid"
+	AnnotationNotifiedReason = "impd.sh/notified-reason"
+	ManagedByManifest        = "manifest"
 )
 
 const (

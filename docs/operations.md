@@ -242,6 +242,81 @@ re-materialized, and keeps the `IMP_CONFIG_DIR` its original spawn set (the
 path is deterministic from the Proc name). The per-proc config dir is removed
 when the Proc object is deleted, not on process exit.
 
+## Failure notifications (Notifier)
+
+The `Notifier` kind is the `OnFailure=` story (M10): declare one object and
+imp pages you when a failure state *holds* — a Proc in CrashLoopBackOff
+past `minRestarts` (default 3), a run-to-completion Proc (timer run,
+one-off) that Failed, or a Daemon rollout stuck past its progress deadline.
+Each firing creates one **notification run**: an ordinary Proc built from
+the Notifier's template, spawned by execd, logged, evented, and listed by
+`impctl get procs -l impd.sh/notifier-name=<name>`.
+
+The failure facts arrive as environment variables — `IMP_NOTIFY_KIND`,
+`IMP_NOTIFY_NAME`, `IMP_NOTIFY_PROC`, `IMP_NOTIFY_REASON`,
+`IMP_NOTIFY_MESSAGE`, `IMP_NOTIFY_EXIT_CODE`, `IMP_NOTIFY_SIGNAL`,
+`IMP_NOTIFY_RESTARTS`, `IMP_NOTIFY_SINCE` (always set; empty when not
+applicable) — so a notifier is any executable. A complete ntfy pager is
+three lines of curl (`examples/notifiers/ntfy.sh`); imp itself never
+carries a notification transport.
+
+Semantics worth knowing:
+
+- **Cooldown, not dedup-forever:** one notification per (target, reason)
+  per `cooldownSeconds` (default 1800). If the failure still holds when
+  the cooldown expires, it fires again — imp's backoff never gives up on
+  a crash-looping daemon (unlike systemd's start-limit-fail), so paging
+  is what makes that safe.
+- **Replicas collapse:** five crash-looping replicas of one Daemon are
+  one page (the dedup key is the owning object), naming the worst
+  replica.
+- **No meta-alerting:** a failing notification run is a Failed Proc with
+  logs for a human — it never triggers another notification. If the
+  paging channel is down, there is nobody left to tell.
+- **Scoping:** `selector` (same `k=v,k!=v` terms as `impctl get -l`)
+  partitions targets between multiple Notifiers; zero Notifiers means no
+  notifications.
+
+See `examples/15-notifier.yaml` and `impctl describe notifier <name>`
+(Recent Runs is the pager history).
+
+## Filesystem sandboxing (M10)
+
+`filesystem:` on a template is the `ProtectSystem=strict` /
+`ProtectHome=` translation — see the hardening table above for the M6/M7
+knobs it composes with:
+
+```yaml
+filesystem:
+  readOnlyRoot: true            # every mount ro except /dev /proc /sys /run,
+                                # private tmpfs, and readWritePaths
+  protectHome: true             # /home /root /run/user hidden (empty ro tmpfs)
+  readWritePaths: ["/var/lib/myservice"]
+```
+
+Needs a privileged impd (`install.sh --privileged`); rootless the spawn
+fails honestly — exit 126, reason in `impctl logs`, CrashLoopBackOff — and
+a Notifier pages about exactly that instead of the service silently
+running unconfined.
+
+## Secrets posture (deliberate non-feature)
+
+imp has no secret-typed kind (decision of record, M10-d). The posture:
+
+- **Files that are secrets** (keys, certs) stay on disk outside imp,
+  owner-only mode; templates carry only their *paths* in `env:`. imp
+  never reads them.
+- **Capability strings** (an ntfy topic, a webhook URL) ride template
+  `env:` in a manifest. Manifest-directory permissions are the guard —
+  `/etc/imp/manifests` root-owned — which is the same trust model as a
+  systemd `EnvironmentFile=` under `/etc`. They also land in imp's store
+  (`/var/lib/imp`, service-owned) and in `describe` output (socket-gated).
+- Keeping such values in `env:` rather than a `Config` also keeps them
+  out of revision identity: rotating a topic does not roll the daemons.
+
+If a real secret-at-rest need appears, `Secret` is a reserved kind name
+(doc: naming reference) — it becomes its own kind, never a Config flag.
+
 ## Shell completion
 
 `impctl completion bash|zsh|fish` emits the standard cobra script (e.g.
@@ -262,9 +337,9 @@ Set `IMP_CGROUP_ROOT` to a writable cgroup v2 path when running
 
 ## Contributor: root sandbox tests
 
-The capability and privateTmp *enforcement* paths need root and are gated
-behind an explicit opt-in (the rootless gates only prove validation and
-the honest-failure paths):
+The capability, privateTmp, and filesystem (M10) *enforcement* paths need
+root and are gated behind an explicit opt-in (the rootless gates only
+prove validation and the honest-failure paths):
 
 ```sh
 sudo IMP_ROOT_SANDBOX_TESTS=1 go test -run TestRootSandbox ./internal/execd/childsetup/

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,7 +30,7 @@ func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 		Use:               "describe (daemon|proc|timer|config) NAME",
 		Short:             "Show details of a specific resource, including events",
 		Args:              cobra.ExactArgs(2),
-		ValidArgsFunction: completeKindThenName(newClient, "daemon", "proc", "timer", "config"),
+		ValidArgsFunction: completeKindThenName(newClient, "daemon", "proc", "timer", "config", "notifier"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, err := resolveKindArg(args[0])
 			if err != nil {
@@ -82,6 +84,21 @@ func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 					return err
 				}
 				describeConfig(out, cfg, events)
+			case v1alpha1.KindNotifier:
+				n, err := c.GetNotifier(ctx, args[1])
+				if err != nil {
+					return err
+				}
+				runs, _, err := c.ListProcs(ctx,
+					client.WithLabelSelector(v1alpha1.LabelNotifierName+"="+n.Metadata.Name))
+				if err != nil {
+					return err
+				}
+				events, err := eventsRegarding(ctx, c, kind, n.Metadata.Name)
+				if err != nil {
+					return err
+				}
+				describeNotifier(out, n, runs, events)
 			}
 			return nil
 		},
@@ -252,10 +269,14 @@ func describeProc(w io.Writer, p *v1alpha1.Proc, events []v1alpha1.Event) {
 			p.Status.State.Waiting.Reason, p.Status.State.Waiting.Message)
 	}
 	if p.Status.State.Terminated != nil {
-		fmt.Fprintf(w, "  Terminated:\texit=%d signal=%s: %s\n",
-			p.Status.State.Terminated.ExitCode,
+		fmt.Fprintf(w, "  Terminated:\texit=%s signal=%s: %s\n",
+			formatExitCode(p.Status.State.Terminated.ExitCode),
 			p.Status.State.Terminated.Signal,
 			p.Status.State.Terminated.Message)
+	}
+	if lt := p.Status.State.LastTerminated; lt != nil {
+		fmt.Fprintf(w, "  Last Exit:\texit=%s signal=%s finished=%s: %s\n",
+			formatExitCode(lt.ExitCode), lt.Signal, formatTime(lt.FinishedAt), lt.Message)
 	}
 	printConditions(w, p.Status.Conditions)
 	printEventsTail(w, events)
@@ -376,11 +397,62 @@ func printEventsTail(w io.Writer, events []v1alpha1.Event) {
 	tw.Flush()
 }
 
+// describeNotifier prints the notification policy, the recent run history
+// (the cooldown/dedup ledger — each run's annotations name its target), and
+// conditions/events.
+func describeNotifier(w io.Writer, n *v1alpha1.Notifier, runs []v1alpha1.Proc, events []v1alpha1.Event) {
+	fmt.Fprintf(w, "Name:\t%s\n", n.Metadata.Name)
+	printLabels(w, n.Metadata.Labels)
+	printAnnotations(w, n.Metadata.Annotations)
+	fmt.Fprintf(w, "Created:\t%s\n", formatTime(n.Metadata.CreationTimestamp))
+
+	fmt.Fprintf(w, "\nCommand:\t%s\n", strings.Join(n.Spec.Template.Spec.Command, " "))
+	fmt.Fprintf(w, "Cooldown:\t%s\n", notifierCooldown(n))
+	if v := n.Spec.MinRestarts; v != nil {
+		fmt.Fprintf(w, "MinRestarts:\t%d\n", *v)
+	}
+	if v := n.Spec.HistoryLimit; v != nil {
+		fmt.Fprintf(w, "HistoryLimit:\t%d\n", *v)
+	}
+	fmt.Fprintf(w, "Selector:\t%s\n", notifierSelector(n))
+	fmt.Fprintf(w, "\nLast Notification:\t%s\n", formatTime(n.Status.LastNotificationTime))
+
+	if len(runs) > 0 {
+		// Newest first — the ledger reads like a pager history.
+		slices.SortFunc(runs, func(a, b v1alpha1.Proc) int {
+			return b.Metadata.CreationTimestamp.Compare(a.Metadata.CreationTimestamp.Time)
+		})
+		fmt.Fprintf(w, "\nRecent Runs:\n")
+		for i := range runs {
+			r := &runs[i]
+			ann := r.Metadata.Annotations
+			fmt.Fprintf(w, "  %s\t%s\t%s %s\t%s\t%s\n",
+				r.Metadata.Name, r.Status.Phase,
+				ann[v1alpha1.AnnotationNotifiedKind], ann[v1alpha1.AnnotationNotifiedName],
+				ann[v1alpha1.AnnotationNotifiedReason],
+				age(r.Metadata.CreationTimestamp))
+		}
+	}
+
+	printConditions(w, n.Status.Conditions)
+	printEventsTail(w, events)
+}
+
 func formatTime(t v1alpha1.Time) string {
 	if t.IsZero() {
 		return "<unknown>"
 	}
 	return t.Time.UTC().Format("2006-01-02 15:04:05") + " +0000 UTC"
+}
+
+// formatExitCode renders a *int exit code; nil (signal-killed, no code)
+// renders "-". Printing the pointer with %d would show its address — the
+// pre-M10 Terminated line did exactly that.
+func formatExitCode(code *int) string {
+	if code == nil {
+		return "-"
+	}
+	return strconv.Itoa(*code)
 }
 
 func sortedKeys(m map[string]string) []string {

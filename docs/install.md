@@ -58,6 +58,48 @@ you point `--cgroup-root` at a real delegated cgroup v2 directory.
 > (or install with systemd `Delegate=yes`) before relying on memory/cpu/pids
 > limits or restart re-attachment.
 
+## Privileged mode (M10-c)
+
+The default system install runs impd as the unprivileged `imp` user — the
+single-user model: every Proc runs as `imp`, and the privileged sandbox
+knobs (`user:`, `capabilities`, `privateTmp`, `filesystem`) fail honestly
+(exit 126) rather than silently not applying. For hosts that want per-Proc
+users and full sandbox enforcement:
+
+```sh
+sudo ./bootstrap/install.sh systemd --privileged   # or: openrc --privileged
+```
+
+What changes:
+
+- impd runs as **root**. systemd: a `privileged.conf` drop-in resets
+  `User=`/`Group=` and the unit-level confinement lines (they are inherited
+  by every Proc and would shadow imp's own per-Proc sandbox — which is the
+  point of this mode). OpenRC: `IMP_PRIVILEGED=1` in `/etc/conf.d/imp`
+  drops `command_user`.
+- The socket stays operator-friendly: impd gets `--socket-group imp`, so
+  members of the `imp` group keep running `impctl` without sudo.
+- Every Proc should now declare `user:` — a template without one runs as
+  root, which is presumably not what you meant.
+- Re-running the installer **without** `--privileged` downgrades back to
+  the single-user model.
+
+Rootless dev (`ad-hoc`, `task run`) is unaffected.
+
+## Alpine Linux / OpenRC notes (M10-c)
+
+Alpine is a first-class OpenRC target: the bootstrap already uses busybox
+`adduser -S`/`addgroup -S` when shadow's tools are absent, and impd/impctl
+are static binaries (musl is a non-issue). Two Alpine specifics:
+
+- **cgroup v2 unified mode:** older Alpine boots OpenRC in hybrid mode.
+  Set `rc_cgroup_mode="unified"` in `/etc/rc.conf` (and reboot) before
+  expecting memory/cpu/pids limits to apply; then follow the prepared-
+  subtree recipe above (`prepare_openrc_cgroup` attempts it at install).
+- The full verification runbook for a fresh Alpine VPS (privileged
+  install, sandbox enforcement, respawn behavior) runs once per host
+  class as part of the M10 close-out; findings land in this section.
+
 ## Shutdown behavior
 
 By default, stopping impd **leaves Procs running** in their cgroups so a

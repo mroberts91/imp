@@ -55,6 +55,9 @@ func TestDaemonDeepCopy(t *testing.T) {
 	*cp.Spec.Template.Spec.PrivateTmp = false
 	cp.Spec.Template.Spec.Configs[0] = ConfigRef{Name: "mutated"}
 	*cp.Spec.Template.Spec.Configs[1].Path = "/mutated" // deep-copied Path pointer
+	*cp.Spec.Template.Spec.Filesystem.ReadOnlyRoot = false
+	*cp.Spec.Template.Spec.Filesystem.ProtectHome = false
+	cp.Spec.Template.Spec.Filesystem.ReadWritePaths[0] = "/mutated"
 	cp.Status.Conditions[0].Status = ConditionTrue
 
 	if after := snapshot(t, orig); after != before {
@@ -76,6 +79,7 @@ func TestProcDeepCopy(t *testing.T) {
 	cp.Spec.Command[0] = "/mutated"
 	*cp.Spec.TerminationGracePeriodSeconds = 999
 	cp.Status.State.Running.PID = 1
+	*cp.Status.State.LastTerminated.ExitCode = 0 // deep-copied lastTerminated (M10-e)
 	cp.Status.Conditions[0].Status = ConditionFalse
 
 	if after := snapshot(t, orig); after != before {
@@ -140,6 +144,29 @@ func TestEventDeepCopy(t *testing.T) {
 
 	cp.Count = 100
 	cp.Regarding.Name = "mutated"
+
+	if after := snapshot(t, orig); after != before {
+		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestNotifierDeepCopy(t *testing.T) {
+	orig := fullNotifier()
+	before := snapshot(t, orig)
+
+	cp := orig.DeepCopy()
+	if diff := cmp.Diff(orig, cp); diff != "" {
+		t.Fatalf("copy differs from original (-orig +copy):\n%s", diff)
+	}
+
+	cp.Metadata.Labels["channel"] = "mutated"
+	cp.Spec.Template.Metadata.Labels["channel"] = "mutated"
+	cp.Spec.Template.Spec.Command[0] = "/mutated"
+	cp.Spec.Template.Spec.Env[0].Value = "mutated"
+	*cp.Spec.CooldownSeconds = 1
+	*cp.Spec.MinRestarts = 99
+	*cp.Spec.HistoryLimit = 1
+	cp.Status.Conditions[0].Status = ConditionFalse
 
 	if after := snapshot(t, orig); after != before {
 		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)

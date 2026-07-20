@@ -53,6 +53,7 @@ events`); you never author it.
 | Advanced | [`12-sandboxed-daemon.yaml`](12-sandboxed-daemon.yaml) | Sandboxing: `capabilities` (bind port 80 as non-root), `noNewPrivileges`, `privateTmp` |
 | Advanced | [`13-config-daemon.yaml`](13-config-daemon.yaml) | `Config` files + `configs` ref: a config edit rolls the Daemon (`IMP_CONFIG_DIR`, roll-on-change) |
 | Advanced | [`14-details.yaml`](14-details.yaml) | The M9 knobs: config `path:`/`binaryData`/`modes`, `maxUnavailable`, timer `timeZone`/`jitterSeconds`/`catchUp`, probe-level `terminationGracePeriodSeconds` |
+| Advanced | [`15-notifier.yaml`](15-notifier.yaml) | `Notifier` (failure paging: crash-loops, failed runs, stuck rollouts → `IMP_NOTIFY_*` exec) + the M10 `filesystem:` sandbox; the three-line ntfy notifier is [`notifiers/ntfy.sh`](notifiers/ntfy.sh) |
 
 Work through one:
 

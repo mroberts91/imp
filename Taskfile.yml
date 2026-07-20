@@ -205,6 +205,13 @@ tasks:
       - bash scripts/m9-acceptance.sh
     platforms: [linux]
 
+  accept:m10:
+    desc: Rootless M10 acceptance (Notifier crash-loop/RunFailed/cooldown/selector/no-meta, filesystem 126-honesty, get/describe notifiers, GC cascade)
+    deps: [build]
+    cmds:
+      - bash scripts/m10-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

@@ -1,0 +1,79 @@
+# 15 — Earning its keep: the M10 Notifier + filesystem sandbox.
+#
+#   systemd OnFailure=alert@%n.service   ->  kind: Notifier (one object, host-wide)
+#   StartLimitBurst crash-loop detection ->  minRestarts (backoff never gives up;
+#                                            it PAGES instead, M10-a)
+#   alert dedup / flap suppression       ->  cooldownSeconds per (target, reason)
+#   ProtectSystem=strict + ReadWritePaths->  filesystem: readOnlyRoot/readWritePaths
+#   ProtectHome=true                     ->  filesystem: protectHome
+#
+# A Notifier is the generic half of failure notification: when a failure
+# level holds — a Proc crash-looping past minRestarts, a run-to-completion
+# Proc failing, a rollout stuck past its progress deadline — it creates ONE
+# notification run from its template, with the failure facts injected as
+# IMP_NOTIFY_* environment variables. The specific half is any executable:
+# see notifiers/ntfy.sh next to this file for the three-line ntfy pattern.
+#
+# Zero Notifiers = no notifications. One = the host-wide default. Several =
+# partitioned by selector. Failure signals are read from status/conditions
+# (levels), never from Events; a failing notification run never notifies
+# about itself (no meta-alerting).
+
+apiVersion: impd.sh/v1alpha1
+kind: Notifier
+metadata:
+  name: default
+spec:
+  # Minimum age of the newest notification for the same (target, reason)
+  # before another may fire. Default 1800 (30 min).
+  cooldownSeconds: 1800
+  # A crash-loop pages only at this many restarts: a loop, not a blip —
+  # and boot-time network flaps never page. Default 3.
+  minRestarts: 3
+  # Optional: only watch targets whose labels match (k=v, k==v, k!=v,
+  # comma-joined). Omit to watch everything.
+  # selector: "team=platform,tier!=dev"
+  template:
+    spec:
+      # The notification run receives (always set, empty when n/a):
+      #   IMP_NOTIFY_KIND      Daemon | Timer | Proc — the object to blame
+      #   IMP_NOTIFY_NAME      its name
+      #   IMP_NOTIFY_PROC      the concrete Proc behind the signal
+      #   IMP_NOTIFY_REASON    CrashLoopBackOff | RunFailed | RolloutStuck
+      #   IMP_NOTIFY_MESSAGE   human-readable summary
+      #   IMP_NOTIFY_EXIT_CODE last exit code (e.g. "126" = sandbox refused)
+      #   IMP_NOTIFY_SIGNAL    killing signal, when signaled
+      #   IMP_NOTIFY_RESTARTS  restart count at firing time
+      #   IMP_NOTIFY_SINCE     RFC3339 of the last failure transition
+      command: ["/usr/local/bin/notify.sh"]
+      env:
+        - name: NTFY_TOPIC
+          value: my-secret-topic
+---
+# A daemon wearing the full M10 sandbox: read-only everything except its
+# state directory, homes hidden. Needs a privileged impd
+# (install.sh --privileged); rootless it fails honestly with exit 126 in
+# the Proc log — and the Notifier above pages about exactly that.
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: hardened
+spec:
+  replicas: 1
+  template:
+    spec:
+      command: ["/usr/local/bin/myservice"]
+      user: svc
+      noNewPrivileges: true
+      privateTmp: true
+      filesystem:
+        # systemd ProtectSystem=strict semantics: EVERY mount goes
+        # read-only (a separate-filesystem /var too) except /dev, /proc,
+        # /sys, /run, private tmpfs mounts, and the carve-outs below.
+        readOnlyRoot: true
+        # systemd ProtectHome=true: /home, /root, /run/user hidden behind
+        # empty read-only tmpfs.
+        protectHome: true
+        # Absolute directories that stay writable. Must exist at spawn.
+        readWritePaths:
+          - /var/lib/myservice

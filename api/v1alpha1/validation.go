@@ -254,6 +254,42 @@ func ValidateTimer(t *Timer) ErrorList {
 	return errs
 }
 
+func ValidateNotifier(n *Notifier) ErrorList {
+	var errs ErrorList
+	errs = append(errs, validateObjectMeta(&n.Metadata, NewPath("metadata"))...)
+
+	specPath := NewPath("spec")
+	if v := n.Spec.CooldownSeconds; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(specPath.Child("cooldownSeconds"), *v, "must be greater than or equal to 0"))
+	}
+	if v := n.Spec.MinRestarts; v != nil && *v < 1 {
+		errs = append(errs, invalidErr(specPath.Child("minRestarts"), *v, "must be greater than or equal to 1"))
+	}
+	if v := n.Spec.HistoryLimit; v != nil && *v < 1 {
+		errs = append(errs, invalidErr(specPath.Child("historyLimit"), *v, "must be greater than or equal to 1"))
+	}
+	if n.Spec.Selector != "" {
+		if _, err := ParseLabelSelector(n.Spec.Selector); err != nil {
+			errs = append(errs, invalidErr(specPath.Child("selector"), n.Spec.Selector, err.Error()))
+		}
+	}
+
+	tplMetaPath := specPath.Child("template").Child("metadata")
+	errs = append(errs, validateLabels(n.Spec.Template.Metadata.Labels, tplMetaPath.Child("labels"))...)
+	errs = append(errs, validateAnnotations(n.Spec.Template.Metadata.Annotations, tplMetaPath.Child("annotations"))...)
+	tplSpecPath := specPath.Child("template").Child("spec")
+	errs = append(errs, validateProcTemplateSpec(&n.Spec.Template.Spec, tplSpecPath)...)
+
+	// A notification is one shot (M10-a2): Never only. OnFailure would
+	// retry inside the run — the cooldown expiring is the retry — and
+	// Always is the daemon posture.
+	if n.Spec.Template.Spec.RestartPolicy != RestartPolicyNever {
+		errs = append(errs, notSupportedErr(tplSpecPath.Child("restartPolicy"), n.Spec.Template.Spec.RestartPolicy,
+			[]string{string(RestartPolicyNever)}))
+	}
+	return errs
+}
+
 func ValidateEvent(e *Event) ErrorList {
 	var errs ErrorList
 	errs = append(errs, validateObjectMeta(&e.Metadata, NewPath("metadata"))...)
@@ -444,6 +480,44 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 		errs = append(errs, validateCapabilities(s.Capabilities, p.Child("capabilities"))...)
 	}
 	errs = append(errs, validateConfigRefs(s.Configs, p.Child("configs"))...)
+	if s.Filesystem != nil {
+		errs = append(errs, validateFilesystemPolicy(s.Filesystem, p.Child("filesystem"))...)
+	}
+	return errs
+}
+
+// validateFilesystemPolicy checks the M10-b sandbox block: it must actually
+// confine something, and carve-out paths must be clean absolute directories
+// that only mean something under a read-only root. Privilege is deliberately
+// NOT checked here — whether impd can apply the policy is host state, and
+// the honest answer at spawn is the exit-126 path, not an admission error.
+func validateFilesystemPolicy(fp *FilesystemPolicy, p *Path) ErrorList {
+	var errs ErrorList
+	readOnly := fp.ReadOnlyRoot != nil && *fp.ReadOnlyRoot
+	protect := fp.ProtectHome != nil && *fp.ProtectHome
+	if !readOnly && !protect {
+		errs = append(errs, requiredErr(p, "at least one of readOnlyRoot or protectHome must be true"))
+	}
+	if len(fp.ReadWritePaths) > 0 && !readOnly {
+		errs = append(errs, invalidErr(p.Child("readWritePaths"), fp.ReadWritePaths,
+			"only meaningful with readOnlyRoot: true (nothing is read-only otherwise)"))
+	}
+	seen := map[string]bool{}
+	for i, path := range fp.ReadWritePaths {
+		rp := p.Child("readWritePaths").Index(i)
+		switch {
+		case !filepath.IsAbs(path):
+			errs = append(errs, invalidErr(rp, path, "must be an absolute path"))
+		case filepath.Clean(path) != path:
+			errs = append(errs, invalidErr(rp, path, "must be a clean path (no '.', '..', or trailing/repeated '/')"))
+		case path == "/":
+			errs = append(errs, invalidErr(rp, path, "must not be the root directory (that is readOnlyRoot: false)"))
+		case seen[path]:
+			errs = append(errs, invalidErr(rp, path, "duplicate path"))
+		default:
+			seen[path] = true
+		}
+	}
 	return errs
 }
 

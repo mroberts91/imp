@@ -250,3 +250,46 @@ func TestDefaultTimerPreservesSetValues(t *testing.T) {
 		t.Errorf("explicit RestartPolicy overwritten to %q", tm.Spec.Template.Spec.RestartPolicy)
 	}
 }
+
+func TestDefaultNotifier(t *testing.T) {
+	n := &Notifier{
+		Metadata: ObjectMeta{Name: "default"},
+		Spec: NotifierSpec{
+			Template: ProcTemplate{Spec: ProcTemplateSpec{Command: []string{"/usr/local/bin/notify"}}},
+		},
+	}
+	DefaultNotifier(n)
+
+	if v := n.Spec.CooldownSeconds; v == nil || *v != 1800 {
+		t.Errorf("CooldownSeconds = %v, want 1800", v)
+	}
+	if v := n.Spec.MinRestarts; v == nil || *v != 3 {
+		t.Errorf("MinRestarts = %v, want 3", v)
+	}
+	if v := n.Spec.HistoryLimit; v == nil || *v != 20 {
+		t.Errorf("HistoryLimit = %v, want 20", v)
+	}
+	if n.Spec.Template.Spec.RestartPolicy != RestartPolicyNever {
+		t.Errorf("RestartPolicy = %q, want Never (a notification is one shot)", n.Spec.Template.Spec.RestartPolicy)
+	}
+	if n.Spec.Template.Spec.StopSignal != DefaultStopSignal {
+		t.Errorf("StopSignal = %q, want %q", n.Spec.Template.Spec.StopSignal, DefaultStopSignal)
+	}
+}
+
+func TestDefaultNotifierPreservesSetValues(t *testing.T) {
+	n := &Notifier{
+		Metadata: ObjectMeta{Name: "default"},
+		Spec: NotifierSpec{
+			CooldownSeconds: new(int32(60)),
+			MinRestarts:     new(int32(1)),
+			HistoryLimit:    new(int32(5)),
+			Template:        ProcTemplate{Spec: ProcTemplateSpec{Command: []string{"/usr/local/bin/notify"}}},
+		},
+	}
+	DefaultNotifier(n)
+	if *n.Spec.CooldownSeconds != 60 || *n.Spec.MinRestarts != 1 || *n.Spec.HistoryLimit != 5 {
+		t.Errorf("explicit values overwritten: cooldown=%d minRestarts=%d historyLimit=%d",
+			*n.Spec.CooldownSeconds, *n.Spec.MinRestarts, *n.Spec.HistoryLimit)
+	}
+}

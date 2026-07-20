@@ -158,6 +158,9 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 			}
 		}
 	}
+	if in.Filesystem != nil {
+		out.Filesystem = in.Filesystem.DeepCopy()
+	}
 	return &out
 }
 
@@ -200,6 +203,22 @@ func (in *Capabilities) DeepCopy() *Capabilities {
 	out := *in
 	out.Bounding = slices.Clone(in.Bounding)
 	out.Ambient = slices.Clone(in.Ambient)
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *FilesystemPolicy) DeepCopy() *FilesystemPolicy {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	if in.ReadOnlyRoot != nil {
+		out.ReadOnlyRoot = new(*in.ReadOnlyRoot)
+	}
+	if in.ProtectHome != nil {
+		out.ProtectHome = new(*in.ProtectHome)
+	}
+	out.ReadWritePaths = slices.Clone(in.ReadWritePaths)
 	return &out
 }
 
@@ -281,6 +300,47 @@ func (in *TimerSpec) DeepCopy() *TimerSpec {
 
 // DeepCopy returns a copy sharing no memory with the original.
 func (in *TimerStatus) DeepCopy() *TimerStatus {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Conditions = slices.Clone(in.Conditions)
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *Notifier) DeepCopy() *Notifier {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Metadata = *in.Metadata.DeepCopy()
+	out.Spec = *in.Spec.DeepCopy()
+	out.Status = *in.Status.DeepCopy()
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *NotifierSpec) DeepCopy() *NotifierSpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Template = *in.Template.DeepCopy()
+	if in.CooldownSeconds != nil {
+		out.CooldownSeconds = new(*in.CooldownSeconds)
+	}
+	if in.MinRestarts != nil {
+		out.MinRestarts = new(*in.MinRestarts)
+	}
+	if in.HistoryLimit != nil {
+		out.HistoryLimit = new(*in.HistoryLimit)
+	}
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *NotifierStatus) DeepCopy() *NotifierStatus {
 	if in == nil {
 		return nil
 	}
@@ -378,6 +438,12 @@ func (in *ProcState) DeepCopy() *ProcState {
 		out.Terminated = new(*in.Terminated)
 		if in.Terminated.ExitCode != nil {
 			out.Terminated.ExitCode = new(*in.Terminated.ExitCode)
+		}
+	}
+	if in.LastTerminated != nil {
+		out.LastTerminated = new(*in.LastTerminated)
+		if in.LastTerminated.ExitCode != nil {
+			out.LastTerminated.ExitCode = new(*in.LastTerminated.ExitCode)
 		}
 	}
 	return &out

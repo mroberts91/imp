@@ -22,7 +22,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	var watch bool
 	var selector string
 	cmd := &cobra.Command{
-		Use:   "get (daemons|procs|events|timers|configs) [NAME]",
+		Use:   "get (daemons|procs|events|timers|configs|notifiers) [NAME]",
 		Short: "Display one or many objects",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -81,7 +81,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: json or yaml (default is a table)")
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "watch for changes after listing")
 	cmd.Flags().StringVarP(&selector, "selector", "l", "", "filter by label (equality terms: k=v, k==v, k!=v, comma-joined); list only")
-	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemons", "procs", "events", "timers", "configs")
+	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemons", "procs", "events", "timers", "configs", "notifiers")
 	return cmd
 }
 
@@ -177,6 +177,14 @@ func printWatchRow(w io.Writer, kind, eventType string, raw json.RawMessage) err
 		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
 			eventType, cfg.Metadata.Name, configFileCount(&cfg),
 			configTotalSize(&cfg), age(cfg.Metadata.CreationTimestamp))
+	case v1alpha1.KindNotifier:
+		var n v1alpha1.Notifier
+		if err := json.Unmarshal(raw, &n); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			eventType, n.Metadata.Name, notifierCooldown(&n),
+			lastNotified(&n), age(n.Metadata.CreationTimestamp))
 	}
 	return nil
 }
@@ -244,6 +252,12 @@ func printTable(w io.Writer, kind string, items []json.RawMessage) error {
 			return err
 		}
 		printConfigTable(w, configs)
+	case v1alpha1.KindNotifier:
+		notifiers, err := decodeItems[v1alpha1.Notifier](items)
+		if err != nil {
+			return err
+		}
+		printNotifierTable(w, notifiers)
 	}
 	return nil
 }

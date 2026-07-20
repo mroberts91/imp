@@ -17,9 +17,10 @@ import (
 const (
 	namespace = "imp"
 
-	ControllerDaemon = "daemon"
-	ControllerGC     = "gc"
-	ControllerTimer  = "timer"
+	ControllerDaemon   = "daemon"
+	ControllerGC       = "gc"
+	ControllerTimer    = "timer"
+	ControllerNotifier = "notifier"
 )
 
 // Registry owns the Prometheus registry and metric vectors.

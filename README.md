@@ -5,7 +5,7 @@ for managing daemons — a middle ground between systemd and Nomad. One daemon
 binary (`impd`) hosts the API, object store, controllers, and process
 supervisor; a CLI (`impctl`) talks to it over a Unix domain socket.
 
-**M1–M9 complete:** drop a Daemon → Procs start → conditions/Events explain
+**M1–M10 complete:** drop a Daemon → Procs start → conditions/Events explain
 failures → cgroup limits (memory/cpu/pids), probes (startup/liveness/
 readiness), `/metrics`, restart re-attach → replicas + RollingUpdate →
 Timer (cron replacement), log retention, `impctl top` → unit-file-grade
@@ -18,8 +18,14 @@ impd) → `Config` files (`configs` refs + `IMP_CONFIG_DIR`; a config edit
 rolls the Daemon like a spec change) → the details: config `path:` /
 `binaryData` / per-file modes, rolling `maxUnavailable`, timer
 `timeZone` / `jitterSeconds` / `catchUp`, probe-level grace, label
-selectors (`impctl get -l`), `top --watch`. Gates: `task accept:m1` …
-`task accept:m9`.
+selectors (`impctl get -l`), `top --watch` → failure paging: the
+`Notifier` kind answers crash-loops, failed runs, and stuck rollouts with
+notification runs carrying `IMP_NOTIFY_*` (a complete ntfy pager is three
+lines of shell — `examples/notifiers/ntfy.sh`), plus the
+`filesystem:` sandbox (`ProtectSystem=strict`-shaped read-only root with
+carve-outs, `protectHome`) and a `--privileged` install mode (root impd,
+per-Proc user drops, sudo-less impctl via `--socket-group`). Gates:
+`task accept:m1` … `task accept:m10`.
 
 ## Quick start (rootless)
 

@@ -171,6 +171,44 @@ func lastRun(tm *v1alpha1.Timer) string {
 	return age(tm.Status.LastScheduleTime)
 }
 
+func printNotifierTable(w io.Writer, notifiers []v1alpha1.Notifier) {
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "NAME\tCOOLDOWN\tSELECTOR\tLAST NOTIFIED\tAGE")
+	for i := range notifiers {
+		n := &notifiers[i]
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			n.Metadata.Name, notifierCooldown(n), notifierSelector(n),
+			lastNotified(n), age(n.Metadata.CreationTimestamp))
+	}
+	tw.Flush()
+}
+
+// notifierCooldown renders spec.cooldownSeconds as a duration.
+func notifierCooldown(n *v1alpha1.Notifier) string {
+	if n.Spec.CooldownSeconds == nil {
+		return "-"
+	}
+	return (time.Duration(*n.Spec.CooldownSeconds) * time.Second).String()
+}
+
+// notifierSelector is the SELECTOR column: the term list, or "-" for every
+// target.
+func notifierSelector(n *v1alpha1.Notifier) string {
+	if n.Spec.Selector == "" {
+		return "-"
+	}
+	return n.Spec.Selector
+}
+
+// lastNotified is the LAST NOTIFIED column: how long ago the newest
+// notification run was created.
+func lastNotified(n *v1alpha1.Notifier) string {
+	if n.Status.LastNotificationTime.IsZero() {
+		return "<never>"
+	}
+	return age(n.Status.LastNotificationTime)
+}
+
 func printConfigTable(w io.Writer, configs []v1alpha1.Config) {
 	tw := newTabWriter(w)
 	fmt.Fprintln(tw, "NAME\tFILES\tSIZE\tAGE")

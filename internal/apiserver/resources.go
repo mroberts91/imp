@@ -331,6 +331,28 @@ func (s *Server) prepare(kind, urlName string, data []byte, forStatus bool) ([]b
 		body, err := json.Marshal(&obj)
 		return body, rv, err
 
+	case v1alpha1.KindNotifier:
+		var obj v1alpha1.Notifier
+		if err := strictUnmarshal(data, &obj); err != nil {
+			return nil, 0, invalidBody(err)
+		}
+		if err := checkIdentity(&obj.TypeMeta, &obj.Metadata, kind, urlName); err != nil {
+			return nil, 0, err
+		}
+		rv, err := parseRV(obj.Metadata.ResourceVersion)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !forStatus {
+			obj.Status = v1alpha1.NotifierStatus{}
+			v1alpha1.DefaultNotifier(&obj)
+			if errs := v1alpha1.ValidateNotifier(&obj); len(errs) > 0 {
+				return nil, 0, &v1alpha1.InvalidError{Errs: errs}
+			}
+		}
+		body, err := json.Marshal(&obj)
+		return body, rv, err
+
 	case v1alpha1.KindConfig:
 		// A Config has no status subresource (M8-i): PUT .../status is honestly
 		// a 404 — the endpoint does not exist for this kind, not a failed write.

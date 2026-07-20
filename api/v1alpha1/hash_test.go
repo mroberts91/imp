@@ -218,10 +218,16 @@ func TestHashProcTemplateSensitivity(t *testing.T) {
 	if HashProcTemplate(withConfigs) == base {
 		t.Error("configs addition did not change hash")
 	}
+
+	withFilesystem := templateForHash()
+	withFilesystem.Spec.Filesystem = &FilesystemPolicy{ReadOnlyRoot: new(true)}
+	if HashProcTemplate(withFilesystem) == base {
+		t.Error("filesystem addition did not change hash")
+	}
 }
 
 // TestHashProcTemplateNilFieldsStable pins that a template leaving every
-// M6 and M7 field nil hashes exactly as it did before those milestones
+// M6+ milestone field nil hashes exactly as it did before those milestones
 // existed (the golden in TestHashProcTemplateGolden). This is the upgrade
 // guarantee: pre-existing Daemons must not roll when impd is upgraded. If
 // this fails, a milestone field leaked into the canonical serialization (a
@@ -232,14 +238,14 @@ func TestHashProcTemplateNilFieldsStable(t *testing.T) {
 		return tpl.Spec.StartupProbe == nil && tpl.Spec.Rlimits == nil && tpl.Spec.Nice == nil &&
 			tpl.Spec.OOMScoreAdjust == nil && tpl.Spec.Umask == nil &&
 			tpl.Spec.NoNewPrivileges == nil && tpl.Spec.Capabilities == nil && tpl.Spec.PrivateTmp == nil &&
-			tpl.Spec.Configs == nil
+			tpl.Spec.Configs == nil && tpl.Spec.Filesystem == nil
 	}
 	if !nilFieldsNil() {
-		t.Fatal("fixture must leave M6/M7/M8 fields nil")
+		t.Fatal("fixture must leave M6+ milestone fields nil")
 	}
 	defaultProcTemplateSpec(&tpl.Spec) // defaulting must not materialize them
 	if !nilFieldsNil() {
-		t.Fatal("defaulting materialized an M6/M7/M8 template field — this rolls every pre-existing Daemon on upgrade")
+		t.Fatal("defaulting materialized an M6+ milestone template field — this rolls every pre-existing Daemon on upgrade")
 	}
 	const golden = "8233565f"
 	if got := HashProcTemplate(tpl); got != golden {

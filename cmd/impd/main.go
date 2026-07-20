@@ -26,6 +26,7 @@ import (
 	"github.com/mroberts91/imp/internal/controllers/daemon"
 	"github.com/mroberts91/imp/internal/controllers/eventttl"
 	"github.com/mroberts91/imp/internal/controllers/gc"
+	"github.com/mroberts91/imp/internal/controllers/notifier"
 	"github.com/mroberts91/imp/internal/controllers/timer"
 	"github.com/mroberts91/imp/internal/etcl"
 	"github.com/mroberts91/imp/internal/execd/cgroups"
@@ -62,16 +63,17 @@ func main() {
 		cgroupRoot          = flag.String("cgroup-root", "", "writable cgroup v2 subtree (empty: auto-detect systemd Delegate= / self cgroup)")
 		killProcsOnShutdown = flag.Bool("kill-procs-on-shutdown", false, "terminate Procs and remove cgroups on impd stop (default: leave them for D1 re-attach)")
 		metricsAddr         = flag.String("metrics-addr", "127.0.0.1:9090", "Prometheus metrics listen address (empty disables)")
+		socketGroup         = flag.String("socket-group", "", "chgrp the API socket to this group (privileged installs: keeps impctl sudo-less for group members; empty: no change)")
 	)
 	flag.Parse()
 
-	if err := run(*socketPath, *dataDir, *manifestDir, *logLevel, *eventTTL, *cgroupRoot, *killProcsOnShutdown, *metricsAddr); err != nil {
+	if err := run(*socketPath, *dataDir, *manifestDir, *logLevel, *eventTTL, *cgroupRoot, *killProcsOnShutdown, *metricsAddr, *socketGroup); err != nil {
 		slog.Error("impd exiting", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Duration, cgroupRootFlag string, killProcsOnShutdown bool, metricsAddr string) error {
+func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Duration, cgroupRootFlag string, killProcsOnShutdown bool, metricsAddr, socketGroup string) error {
 	var level slog.Level
 	if err := level.UnmarshalText([]byte(logLevel)); err != nil {
 		return fmt.Errorf("invalid --log-level %q: %w", logLevel, err)
@@ -106,6 +108,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	manifestRec := recorder.New(ctlClient, "manifest", clk)
 	daemonRec := recorder.New(ctlClient, daemon.ReportingComponent, clk)
 	timerRec := recorder.New(ctlClient, timer.ReportingComponent, clk)
+	notifierRec := recorder.New(ctlClient, notifier.ReportingComponent, clk)
 	execRec := recorder.New(ctlClient, "execd", clk)
 
 	// execd supervisor: handlers never fire before Run, so assigning the
@@ -129,6 +132,13 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	if err != nil {
 		store.Close()
 		return err
+	}
+	if socketGroup != "" {
+		if err := apiserver.SetSocketGroup(socketPath, socketGroup); err != nil {
+			listener.Close()
+			store.Close()
+			return err
+		}
 	}
 	httpServer := &http.Server{Handler: server.Handler()}
 
@@ -176,12 +186,29 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		timer.New(ctlClient, tcTimerInf.Store(), tcProcInf.Store(), clk, timerRec), 1, tcTimerInf, tcProcInf)
 	tcRunner.SetMetrics(met, metrics.ControllerTimer)
 
+	// Notifier controller (M10-a): a Notifier change enqueues its own key;
+	// any Daemon, Timer, or Proc change enqueues every Notifier — failure
+	// signals are levels on other kinds. Single-host object counts make the
+	// fan-out cheap; resync is the safety net.
+	ncQueue := queue.NewRateLimiting(queue.DefaultRateLimiter())
+	ncNotifierInf := cache.NewInformer(ctlClient, v1alpha1.KindNotifier, func(key string) { ncQueue.Add(key) }, nil)
+	ncFanOut := notifier.EnqueueAllNotifiers(ncNotifierInf.Store(), ncQueue)
+	ncDaemonInf := cache.NewInformer(ctlClient, v1alpha1.KindDaemon, ncFanOut, nil)
+	ncTimerInf := cache.NewInformer(ctlClient, v1alpha1.KindTimer, ncFanOut, nil)
+	ncProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, ncFanOut, nil)
+	ncRunner := controllers.NewRunner("notifier-controller", ncQueue,
+		notifier.New(ctlClient, ncNotifierInf.Store(), ncDaemonInf.Store(), ncTimerInf.Store(), ncProcInf.Store(), clk, notifierRec),
+		1, ncNotifierInf, ncDaemonInf, ncTimerInf, ncProcInf)
+	ncRunner.SetMetrics(met, metrics.ControllerNotifier)
+
 	gcQueue := queue.NewRateLimiting(queue.DefaultRateLimiter())
 	gcProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) { gcQueue.Add(key) }, nil)
 	gcDaemonInf := cache.NewInformer(ctlClient, v1alpha1.KindDaemon, gc.EnqueueOwnedProcs(gcProcInf.Store(), gcQueue), nil)
 	gcTimerInf := cache.NewInformer(ctlClient, v1alpha1.KindTimer, gc.EnqueueOwnedProcs(gcProcInf.Store(), gcQueue), nil)
+	gcNotifierInf := cache.NewInformer(ctlClient, v1alpha1.KindNotifier, gc.EnqueueOwnedProcs(gcProcInf.Store(), gcQueue), nil)
 	gcRunner := controllers.NewRunner("gc", gcQueue,
-		gc.New(ctlClient, gcDaemonInf.Store(), gcTimerInf.Store(), gcProcInf.Store()), 1, gcDaemonInf, gcTimerInf, gcProcInf)
+		gc.New(ctlClient, gcDaemonInf.Store(), gcTimerInf.Store(), gcNotifierInf.Store(), gcProcInf.Store()),
+		1, gcDaemonInf, gcTimerInf, gcNotifierInf, gcProcInf)
 	gcRunner.SetMetrics(met, metrics.ControllerGC)
 
 	ttlCtl := eventttl.New(ctlClient, eventTTL, clk)
@@ -203,8 +230,13 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	go dcConfigInf.Run(ctx)
 	go tcTimerInf.Run(ctx)
 	go tcProcInf.Run(ctx)
+	go ncNotifierInf.Run(ctx)
+	go ncDaemonInf.Run(ctx)
+	go ncTimerInf.Run(ctx)
+	go ncProcInf.Run(ctx)
 	go gcDaemonInf.Run(ctx)
 	go gcTimerInf.Run(ctx)
+	go gcNotifierInf.Run(ctx)
 	go gcProcInf.Run(ctx)
 	go execInf.Run(ctx)
 
@@ -226,6 +258,13 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		defer close(timerDone)
 		if err := tcRunner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Error("timer controller failed", "component", "timer-controller", "error", err)
+		}
+	}()
+	notifierDone := make(chan struct{})
+	go func() {
+		defer close(notifierDone)
+		if err := ncRunner.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			slog.Error("notifier controller failed", "component", "notifier-controller", "error", err)
 		}
 	}()
 	gcDone := make(chan struct{})
@@ -259,7 +298,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		return fmt.Errorf("api-server: %w", err)
 	}
 
-	// Ordered shutdown: manifest → controllers (daemon, timer, gc, eventttl) → execd → metrics → store → HTTP.
+	// Ordered shutdown: manifest → controllers (daemon, timer, notifier, gc, eventttl) → execd → metrics → store → HTTP.
 	select {
 	case <-watcherDone:
 	case <-time.After(5 * time.Second):
@@ -274,6 +313,11 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	case <-timerDone:
 	case <-time.After(5 * time.Second):
 		slog.Warn("timer controller did not stop in time")
+	}
+	select {
+	case <-notifierDone:
+	case <-time.After(5 * time.Second):
+		slog.Warn("notifier controller did not stop in time")
 	}
 	select {
 	case <-gcDone:

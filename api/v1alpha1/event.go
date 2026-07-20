@@ -51,6 +51,9 @@ const (
 	// ReasonProgressDeadlineExceeded (M6): a Daemon rollout made no progress
 	// for spec.progressDeadlineSeconds.
 	ReasonProgressDeadlineExceeded = "ProgressDeadlineExceeded"
+	// ReasonNotified (M10-a): a Notifier created a notification run for a
+	// firing failure signal.
+	ReasonNotified = "Notified"
 )
 
 // Event is an append-only, TTL-bounded record of something notable happening

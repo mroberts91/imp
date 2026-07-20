@@ -23,11 +23,12 @@ const DefaultSocketPath = "/run/imp/impd.sock"
 const apiPrefix = "/apis/impd.sh/v1alpha1/"
 
 var pluralByKind = map[string]string{
-	v1alpha1.KindDaemon: "daemons",
-	v1alpha1.KindProc:   "procs",
-	v1alpha1.KindEvent:  "events",
-	v1alpha1.KindTimer:  "timers",
-	v1alpha1.KindConfig: "configs",
+	v1alpha1.KindDaemon:   "daemons",
+	v1alpha1.KindProc:     "procs",
+	v1alpha1.KindEvent:    "events",
+	v1alpha1.KindTimer:    "timers",
+	v1alpha1.KindConfig:   "configs",
+	v1alpha1.KindNotifier: "notifiers",
 }
 
 type Client struct {

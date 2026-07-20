@@ -5,76 +5,36 @@ package apiserver
 
 import (
 	"encoding/json"
-	"strings"
+	"errors"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
 )
 
-// labelTerm is one equality requirement from a labelSelector. negate is the
-// k!=v form; otherwise it is k=v / k==v.
-type labelTerm struct {
-	key    string
-	value  string
-	negate bool
-}
+// Selector parsing and matching moved to api/v1alpha1 in M10 (the wire
+// syntax is API semantics; NotifierSpec.Selector shares it). This file keeps
+// the HTTP-facing shaping: the labelSelector-field error and the raw-item
+// filter for list responses.
 
-// matches reports whether labels satisfy the term, with k8s equality-selector
-// semantics for a missing key: k=v fails, k!=v succeeds.
-func (t labelTerm) matches(labels map[string]string) bool {
-	v, ok := labels[t.key]
-	if t.negate {
-		return !ok || v != t.value
-	}
-	return ok && v == t.value
-}
-
-// parseLabelSelector parses a comma-joined list of equality terms (k=v, k==v,
-// k!=v) into requirements ANDed together (M9-i). An empty selector yields no
-// terms (matches everything). A malformed term is an ErrInvalid on the
-// labelSelector field.
-func parseLabelSelector(sel string) ([]labelTerm, error) {
-	sel = strings.TrimSpace(sel)
-	if sel == "" {
-		return nil, nil
-	}
-	var terms []labelTerm
-	for raw := range strings.SplitSeq(sel, ",") {
-		term := strings.TrimSpace(raw)
-		var t labelTerm
-		var k, v string
-		switch {
-		case term == "":
-			return nil, selectorInvalid(raw, "empty selector term")
-		case strings.Contains(term, "!="):
-			k, v, _ = strings.Cut(term, "!=")
-			t.negate = true
-		case strings.Contains(term, "=="):
-			k, v, _ = strings.Cut(term, "==")
-		case strings.Contains(term, "="):
-			k, v, _ = strings.Cut(term, "=")
-		default:
-			return nil, selectorInvalid(term, "must be an equality term (k=v, k==v, or k!=v)")
+// parseLabelSelector parses a ?labelSelector= value (M9-i). A malformed term
+// is an ErrInvalid on the labelSelector field.
+func parseLabelSelector(sel string) ([]v1alpha1.LabelSelectorTerm, error) {
+	terms, err := v1alpha1.ParseLabelSelector(sel)
+	if err != nil {
+		if selErr, ok := errors.AsType[*v1alpha1.SelectorError](err); ok {
+			return nil, &v1alpha1.InvalidError{Errs: v1alpha1.ErrorList{{
+				Type: v1alpha1.ErrorTypeInvalid, Field: "labelSelector",
+				BadValue: selErr.BadValue, Detail: selErr.Detail,
+			}}}
 		}
-		t.key = strings.TrimSpace(k)
-		t.value = strings.TrimSpace(v)
-		if t.key == "" {
-			return nil, selectorInvalid(term, "term key must not be empty")
-		}
-		terms = append(terms, t)
+		return nil, err
 	}
 	return terms, nil
-}
-
-func selectorInvalid(badValue, detail string) error {
-	return &v1alpha1.InvalidError{Errs: v1alpha1.ErrorList{{
-		Type: v1alpha1.ErrorTypeInvalid, Field: "labelSelector", BadValue: badValue, Detail: detail,
-	}}}
 }
 
 // filterByLabels keeps only items whose labels satisfy every term (AND). Items
 // are partial-decoded for their metadata.labels; an unreadable item is dropped
 // (the store holds only validated objects, so this is defensive).
-func filterByLabels(items []json.RawMessage, terms []labelTerm) []json.RawMessage {
+func filterByLabels(items []json.RawMessage, terms []v1alpha1.LabelSelectorTerm) []json.RawMessage {
 	out := make([]json.RawMessage, 0, len(items))
 	for _, raw := range items {
 		var meta struct {
@@ -85,14 +45,7 @@ func filterByLabels(items []json.RawMessage, terms []labelTerm) []json.RawMessag
 		if err := json.Unmarshal(raw, &meta); err != nil {
 			continue
 		}
-		keep := true
-		for _, t := range terms {
-			if !t.matches(meta.Metadata.Labels) {
-				keep = false
-				break
-			}
-		}
-		if keep {
+		if v1alpha1.LabelsMatch(meta.Metadata.Labels, terms) {
 			out = append(out, raw)
 		}
 	}

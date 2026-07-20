@@ -29,6 +29,9 @@
 : "${IMP_RUN_DIR:=/run/imp}"               # holds the unix socket (tmpfs)
 : "${IMP_SOCKET:=${IMP_RUN_DIR}/impd.sock}"  # --socket (and impctl's IMP_SOCKET)
 : "${IMP_BIN_DIR:=/usr/local/bin}"         # where impd/impctl get installed
+: "${IMP_PRIVILEGED:=0}"                   # 1: impd runs as root (M10-c) —
+                                           # full per-Proc sandbox enforcement;
+                                           # set by install.sh --privileged
 # OpenRC: writable cgroup v2 subtree for --cgroup-root (systemd uses Delegate=).
 : "${IMP_CGROUP_ROOT:=}"
 

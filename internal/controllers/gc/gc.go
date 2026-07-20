@@ -44,12 +44,13 @@ type Controller struct {
 // New builds the GC controller around the API client and the informer
 // stores (one per ownable kind, plus procs). It creates no informers or
 // queues; wiring owns those.
-func New(c *client.Client, daemons, timers, procs *cache.Store) *Controller {
+func New(c *client.Client, daemons, timers, notifiers, procs *cache.Store) *Controller {
 	return &Controller{
 		client: c,
 		owners: map[string]*cache.Store{
-			v1alpha1.KindDaemon: daemons,
-			v1alpha1.KindTimer:  timers,
+			v1alpha1.KindDaemon:   daemons,
+			v1alpha1.KindTimer:    timers,
+			v1alpha1.KindNotifier: notifiers,
 		},
 		procs: procs,
 		log:   slog.With("component", "gc", "kind", v1alpha1.KindProc),
@@ -65,6 +66,8 @@ func (c *Controller) liveGone(ctx context.Context, ref v1alpha1.OwnerReference) 
 		_, err = c.client.GetDaemon(ctx, ref.Name)
 	case v1alpha1.KindTimer:
 		_, err = c.client.GetTimer(ctx, ref.Name)
+	case v1alpha1.KindNotifier:
+		_, err = c.client.GetNotifier(ctx, ref.Name)
 	default:
 		return false, fmt.Errorf("gc: no live check for owner kind %q", ref.Kind)
 	}
@@ -151,7 +154,7 @@ func EnqueueOwnedProcs(procs *cache.Store, q queue.RateLimitingInterface) func(k
 	log := slog.With("component", "gc", "kind", v1alpha1.KindProc)
 	return func(key string) {
 		kind, name, ok := strings.Cut(key, "/")
-		if !ok || (kind != v1alpha1.KindDaemon && kind != v1alpha1.KindTimer) {
+		if !ok || (kind != v1alpha1.KindDaemon && kind != v1alpha1.KindTimer && kind != v1alpha1.KindNotifier) {
 			return
 		}
 		for _, raw := range procs.List() {

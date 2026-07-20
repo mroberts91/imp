@@ -5,7 +5,7 @@ for managing daemons — a middle ground between systemd and Nomad. One daemon
 binary (`impd`) hosts the API, object store, controllers, and process
 supervisor; a CLI (`impctl`) talks to it over a Unix domain socket.
 
-**M1–M8 complete:** drop a Daemon → Procs start → conditions/Events explain
+**M1–M9 complete:** drop a Daemon → Procs start → conditions/Events explain
 failures → cgroup limits (memory/cpu/pids), probes (startup/liveness/
 readiness), `/metrics`, restart re-attach → replicas + RollingUpdate →
 Timer (cron replacement), log retention, `impctl top` → unit-file-grade
@@ -15,8 +15,11 @@ hardening (rlimits, nice, oomScoreAdjust, umask), rollout safety
 (`noNewPrivileges`, systemd-shaped `capabilities` — bind port 80 as
 non-root — and `privateTmp`; privileged knobs fail loudly under a rootless
 impd) → `Config` files (`configs` refs + `IMP_CONFIG_DIR`; a config edit
-rolls the Daemon like a spec change). Gates: `task accept:m1` …
-`task accept:m8`.
+rolls the Daemon like a spec change) → the details: config `path:` /
+`binaryData` / per-file modes, rolling `maxUnavailable`, timer
+`timeZone` / `jitterSeconds` / `catchUp`, probe-level grace, label
+selectors (`impctl get -l`), `top --watch`. Gates: `task accept:m1` …
+`task accept:m9`.
 
 ## Quick start (rootless)
 

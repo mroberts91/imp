@@ -216,17 +216,28 @@ func rollingPartition(d *v1alpha1.Daemon) int {
 }
 
 // rollingUpdate performs one step of a StatefulSet-style roll: walk
-// ordinals high→low from replicas-1 down to partition; wait if a higher
-// ordinal's Proc is not available (Ready for minReadySeconds — M6; or its
-// slot state is unknown); delete at most one stale Proc per call. done is
-// true when no rolling work remains for this pass (caller may scale). When
-// done is false the status has already been rolled up.
+// ordinals high→low from replicas-1 down to partition, deleting stale Procs
+// within a maxUnavailable budget (M9-e). The budget starts at maxUnavailable
+// (nil = 1, today's one-at-a-time behavior) and is spent by every ordinal in
+// range that is already unavailable — a Proc still maturing (not available for
+// minReadySeconds — M6), an empty slot whose replacement the informer hasn't
+// observed, or a stale Proc this pass deletes. Stopping when the budget hits 0
+// keeps at most maxUnavailable ordinals down at once. done is true when no
+// rolling work remains for this pass (caller may scale); when false the status
+// has already been rolled up.
 func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, rev revision, partition int) (done bool, err error) {
 	replicas := int(*d.Spec.Replicas)
+	budget := 1
+	if ru := d.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.MaxUnavailable != nil {
+		budget = int(*ru.MaxUnavailable)
+	}
 	byIndex := indexProcs(current, stale)
 	now := c.clock.Now()
+	reason := rollReason(stale, rev)
 
-	for idx := replicas - 1; idx >= partition; idx-- {
+	deleted := 0
+	sawDown := false // an already-unavailable slot we can only wait on
+	for idx := replicas - 1; idx >= partition && budget > 0; idx-- {
 		slot := byIndex[idx]
 		available := false
 		if slot.current != nil {
@@ -234,37 +245,53 @@ func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, curr
 		}
 		switch {
 		case slot.current != nil && !available:
-			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
-				return false, err
-			}
-			return false, nil
-		case slot.current == nil && slot.stale == nil:
-			// Empty slot: a replacement created by an earlier pass that the
-			// informer has not observed yet (the caller fills genuine holes
-			// before walking), or a malformed replica-index label. Never
-			// roll past an ordinal whose state is unknown — treat it like a
-			// not-Ready Proc and wait for the cache to catch up.
-			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
-				return false, err
-			}
-			return false, nil
+			// A current Proc still maturing or failed: already down, so it
+			// consumes a budget unit but there is nothing to delete.
+			sawDown = true
+			budget--
 		case slot.stale != nil:
+			// Delete this stale Proc to advance the roll (its replacement is
+			// created next pass). Consumes a budget unit.
 			name := slot.stale.Metadata.Name
 			switch err := c.client.DeleteProc(ctx, name); {
 			case errors.Is(err, v1alpha1.ErrNotFound):
-				// Already gone (cache lag from a prior pass): nothing was
-				// deleted this pass, so no event.
+				// Already gone (cache lag from a prior pass): nothing deleted,
+				// no event, but the slot is now down — spend the budget unit.
 			case err != nil:
 				return false, fmt.Errorf("deleting stale proc %s: %w", name, err)
 			default:
-				c.emit(ctx, d, rollReason(stale, rev),
+				deleted++
+				c.emit(ctx, d, reason,
 					fmt.Sprintf("rolling update to revision %s: deleted stale proc %s (ordinal %d)", rev.suffix, name, idx))
 			}
-			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
-				return false, err
-			}
-			return false, controllers.RequeueAfter{After: recreateDelay}
+			budget--
+		case slot.current != nil:
+			// Current and available: up, costs nothing — move to the next.
+		default:
+			// Empty slot: a replacement created by an earlier pass the informer
+			// has not observed yet, or a malformed replica-index label. Its
+			// ordinal's state is unknown; treat it as down and wait.
+			sawDown = true
+			budget--
 		}
+	}
+
+	if deleted > 0 {
+		// Deleted one or more stale Procs this pass: roll up, then requeue to
+		// create the replacements next pass (same shape as one-at-a-time).
+		if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
+			return false, err
+		}
+		return false, controllers.RequeueAfter{After: recreateDelay}
+	}
+	if sawDown {
+		// No stale was deletable (budget spent on already-down slots): wait.
+		// rollupStatus's own time-driven requeue (maturation/deadline), if any,
+		// propagates as the returned error.
+		if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
 	return true, nil
 }

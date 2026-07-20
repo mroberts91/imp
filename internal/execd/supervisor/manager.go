@@ -142,6 +142,8 @@ func (m *Manager) ProcStats() []v1alpha1.ProcStat {
 			CPUUsageUsec:       st.CPUUsageUsec,
 			MemoryCurrentBytes: st.MemoryCurrent,
 			PidsCurrent:        st.PidsCurrent,
+			NrThrottled:        st.NrThrottled,
+			ThrottledUsec:      st.ThrottledUsec,
 			SampledAt:          now,
 		}
 		switch {

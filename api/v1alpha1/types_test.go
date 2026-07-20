@@ -65,7 +65,7 @@ func fullDaemon() *Daemon {
 						Ambient:  []string{"net_bind_service"},
 					},
 					PrivateTmp: new(true),
-					Configs:    []string{"app", "shared"},
+					Configs:    []ConfigRef{{Name: "app"}, {Name: "shared", Path: new("/etc/shared")}},
 					LivenessProbe: &Probe{
 						Exec:                &ExecAction{Command: []string{"/bin/true"}},
 						InitialDelaySeconds: 2,
@@ -197,7 +197,9 @@ func fullConfig() *Config {
 				"app.conf":  "listen 8080\n",
 				"logrotate": "daily\n",
 			},
-			Mode: new("0600"),
+			BinaryData: map[string][]byte{"cert.der": {0x00, 0x01, 0x02, 0x03}},
+			Mode:       new("0600"),
+			Modes:      map[string]string{"app.conf": "0400"},
 		},
 	}
 }

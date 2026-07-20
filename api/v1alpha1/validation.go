@@ -9,12 +9,12 @@ package v1alpha1
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-
-	"github.com/robfig/cron/v3"
+	"time"
 )
 
 const (
@@ -146,12 +146,21 @@ func ValidateDaemon(d *Daemon) ErrorList {
 			))
 		}
 	case UpdateStrategyRollingUpdate:
-		if ru := d.Spec.UpdateStrategy.RollingUpdate; ru != nil && ru.Partition != nil && *ru.Partition < 0 {
-			errs = append(errs, invalidErr(
-				stratPath.Child("rollingUpdate").Child("partition"),
-				*ru.Partition,
-				"must be greater than or equal to 0",
-			))
+		if ru := d.Spec.UpdateStrategy.RollingUpdate; ru != nil {
+			if ru.Partition != nil && *ru.Partition < 0 {
+				errs = append(errs, invalidErr(
+					stratPath.Child("rollingUpdate").Child("partition"),
+					*ru.Partition,
+					"must be greater than or equal to 0",
+				))
+			}
+			if ru.MaxUnavailable != nil && *ru.MaxUnavailable < 1 {
+				errs = append(errs, invalidErr(
+					stratPath.Child("rollingUpdate").Child("maxUnavailable"),
+					*ru.MaxUnavailable,
+					"must be greater than or equal to 1",
+				))
+			}
 		}
 	default:
 		errs = append(errs, notSupportedErr(
@@ -191,8 +200,24 @@ func ValidateTimer(t *Timer) ErrorList {
 	specPath := NewPath("spec")
 	if t.Spec.Schedule == "" {
 		errs = append(errs, requiredErr(specPath.Child("schedule"), ""))
-	} else if _, err := cron.ParseStandard(t.Spec.Schedule); err != nil {
-		errs = append(errs, invalidErr(specPath.Child("schedule"), t.Spec.Schedule, err.Error()))
+	} else {
+		// Validate the zone on its own field first; only then re-parse the
+		// schedule in that zone (the same composition the controller does).
+		zoneOK := true
+		if t.Spec.TimeZone != nil {
+			if _, err := time.LoadLocation(*t.Spec.TimeZone); err != nil {
+				errs = append(errs, invalidErr(specPath.Child("timeZone"), *t.Spec.TimeZone, err.Error()))
+				zoneOK = false
+			}
+		}
+		if zoneOK {
+			if _, err := ParseTimerSchedule(&t.Spec); err != nil {
+				errs = append(errs, invalidErr(specPath.Child("schedule"), t.Spec.Schedule, err.Error()))
+			}
+		}
+	}
+	if v := t.Spec.JitterSeconds; v != nil && *v < 0 {
+		errs = append(errs, invalidErr(specPath.Child("jitterSeconds"), *v, "must be greater than or equal to 0"))
 	}
 
 	switch t.Spec.ConcurrencyPolicy {
@@ -252,18 +277,33 @@ func ValidateConfig(c *Config) ErrorList {
 	var errs ErrorList
 	errs = append(errs, validateObjectMeta(&c.Metadata, NewPath("metadata"))...)
 
-	dataPath := NewPath("spec").Child("data")
+	specPath := NewPath("spec")
+	dataPath := specPath.Child("data")
+	binaryPath := specPath.Child("binaryData")
+
+	// Files and total bytes are counted across data + binaryData (M9-d); the
+	// aggregate errors stay on spec.data, the primary field.
+	fileCount := len(c.Spec.Data) + len(c.Spec.BinaryData)
 	switch {
-	case len(c.Spec.Data) == 0:
-		errs = append(errs, requiredErr(dataPath, "at least one file is required"))
-	case len(c.Spec.Data) > maxConfigFiles:
-		errs = append(errs, invalidErr(dataPath, len(c.Spec.Data),
-			fmt.Sprintf("must not contain more than %d files", maxConfigFiles)))
+	case fileCount == 0:
+		errs = append(errs, requiredErr(dataPath, "at least one file is required (data or binaryData)"))
+	case fileCount > maxConfigFiles:
+		errs = append(errs, invalidErr(dataPath, fileCount,
+			fmt.Sprintf("must not contain more than %d files across data and binaryData", maxConfigFiles)))
 	}
 	total := 0
 	for name, content := range c.Spec.Data {
 		if msg := configFilenameMsg(name); msg != "" {
 			errs = append(errs, invalidErr(dataPath.Key(name), name, msg))
+		}
+		total += len(content)
+	}
+	for name, content := range c.Spec.BinaryData {
+		if msg := configFilenameMsg(name); msg != "" {
+			errs = append(errs, invalidErr(binaryPath.Key(name), name, msg))
+		}
+		if _, dup := c.Spec.Data[name]; dup {
+			errs = append(errs, invalidErr(binaryPath.Key(name), name, "filename must not also appear in data"))
 		}
 		total += len(content)
 	}
@@ -273,7 +313,18 @@ func ValidateConfig(c *Config) ErrorList {
 	}
 	if c.Spec.Mode != nil {
 		if msg := configModeMsg(*c.Spec.Mode); msg != "" {
-			errs = append(errs, invalidErr(NewPath("spec").Child("mode"), *c.Spec.Mode, msg))
+			errs = append(errs, invalidErr(specPath.Child("mode"), *c.Spec.Mode, msg))
+		}
+	}
+	for name, mode := range c.Spec.Modes {
+		mp := specPath.Child("modes").Key(name)
+		_, inData := c.Spec.Data[name]
+		_, inBinary := c.Spec.BinaryData[name]
+		if !inData && !inBinary {
+			errs = append(errs, invalidErr(mp, name, "must name a file present in data or binaryData"))
+		}
+		if msg := configModeMsg(mode); msg != "" {
+			errs = append(errs, invalidErr(mp, mode, msg))
 		}
 	}
 	return errs
@@ -396,26 +447,49 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 	return errs
 }
 
-// validateConfigRefs checks each Config reference is a legal object name and
-// that the list has no duplicates. Existence is deliberately NOT checked here:
-// manifest-dir creation order is free, and the runtime missing-config story is
-// M8-h's (the DaemonController holds until the Config appears).
-func validateConfigRefs(refs []string, p *Path) ErrorList {
+// validateConfigRefs checks each Config reference is a legal object name with a
+// clean absolute path (when set), and that neither names nor paths collide.
+// Existence is deliberately NOT checked here: manifest-dir creation order is
+// free, and the runtime missing-config story is M8-h's (the DaemonController
+// holds until the Config appears).
+func validateConfigRefs(refs []ConfigRef, p *Path) ErrorList {
 	var errs ErrorList
-	seen := map[string]bool{}
-	for i, name := range refs {
+	seenName := map[string]bool{}
+	seenPath := map[string]bool{}
+	for i, ref := range refs {
 		switch {
-		case name == "":
+		case ref.Name == "":
 			errs = append(errs, requiredErr(p.Index(i), ""))
-		case len(name) > maxNameLength || !dns1123SubdomainRegexp.MatchString(name):
-			errs = append(errs, invalidErr(p.Index(i), name, "must be "+dns1123SubdomainFmt))
-		case seen[name]:
-			errs = append(errs, invalidErr(p.Index(i), name, "duplicate config reference"))
+		case len(ref.Name) > maxNameLength || !dns1123SubdomainRegexp.MatchString(ref.Name):
+			errs = append(errs, invalidErr(p.Index(i), ref.Name, "must be "+dns1123SubdomainFmt))
+		case seenName[ref.Name]:
+			errs = append(errs, invalidErr(p.Index(i), ref.Name, "duplicate config reference"))
 		default:
-			seen[name] = true
+			seenName[ref.Name] = true
+		}
+		if ref.Path != nil {
+			errs = append(errs, validateConfigRefPath(*ref.Path, p.Index(i).Child("path"), seenPath)...)
 		}
 	}
 	return errs
+}
+
+// validateConfigRefPath checks a per-reference destination path (M9-b): it must
+// be absolute, already clean, not the root, and unique among the template's
+// refs (two refs sharing a directory would collide on materialization).
+func validateConfigRefPath(path string, p *Path, seen map[string]bool) ErrorList {
+	switch {
+	case !filepath.IsAbs(path):
+		return ErrorList{invalidErr(p, path, "must be an absolute path")}
+	case filepath.Clean(path) != path:
+		return ErrorList{invalidErr(p, path, "must be a clean path (no '.', '..', or trailing/repeated '/')")}
+	case path == "/":
+		return ErrorList{invalidErr(p, path, "must not be the root directory")}
+	case seen[path]:
+		return ErrorList{invalidErr(p, path, "duplicate reference path — two refs would materialize into the same directory")}
+	}
+	seen[path] = true
+	return nil
 }
 
 func validateCapabilities(c *Capabilities, p *Path) ErrorList {
@@ -611,6 +685,18 @@ func validateProbe(probe *Probe, p *Path, liveness bool) ErrorList {
 	}
 	if probe.FailureThreshold < 1 {
 		errs = append(errs, invalidErr(p.Child("failureThreshold"), probe.FailureThreshold, "must be greater than or equal to 1"))
+	}
+	// Probe-level grace (M9-l): liveness/startup only — a readiness failure
+	// never kills, so a grace there is meaningless (k8s parity). The liveness
+	// flag is true for both liveness and startup probes.
+	if v := probe.TerminationGracePeriodSeconds; v != nil {
+		switch {
+		case !liveness:
+			errs = append(errs, invalidErr(p.Child("terminationGracePeriodSeconds"), *v,
+				"may not be set on readiness probes (a readiness failure does not kill the process)"))
+		case *v < 1:
+			errs = append(errs, invalidErr(p.Child("terminationGracePeriodSeconds"), *v, "must be greater than or equal to 1"))
+		}
 	}
 	return errs
 }

@@ -65,15 +65,28 @@ func TestEnsureApplyLimitsStatsListRemove(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(path, fileMemoryCurrent), []byte("4096\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(path, fileCPUStat), []byte("usage_usec 12345\nuser_usec 1\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(path, fileCPUStat),
+		[]byte("usage_usec 12345\nuser_usec 1\nnr_periods 100\nnr_throttled 7\nthrottled_usec 890\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	st, err := m.Stats(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.MemoryCurrent != 4096 || st.CPUUsageUsec != 12345 {
+	if st.MemoryCurrent != 4096 || st.CPUUsageUsec != 12345 || st.NrThrottled != 7 || st.ThrottledUsec != 890 {
 		t.Fatalf("stats = %+v", st)
+	}
+
+	// Throttle lines absent (no cpu.max set): best-effort → 0, no error.
+	if err := os.WriteFile(filepath.Join(path, fileCPUStat), []byte("usage_usec 22222\nuser_usec 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = m.Stats(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.CPUUsageUsec != 22222 || st.NrThrottled != 0 || st.ThrottledUsec != 0 {
+		t.Fatalf("stats with no throttle lines = %+v, want throttle counters 0", st)
 	}
 
 	uids, err := m.ListProcDirs()

@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/robfig/cron/v3"
 	"github.com/spf13/cobra"
 
 	"github.com/mroberts91/imp/api/v1alpha1"
@@ -148,6 +147,19 @@ type configSummary struct {
 	note     string
 }
 
+// configRefDisplay renders each ref for describe: "name" or "name → /path"
+// when a destination path is set (M9-b/M9-o).
+func configRefDisplay(refs []v1alpha1.ConfigRef) []string {
+	out := make([]string, len(refs))
+	for i, ref := range refs {
+		out[i] = ref.Name
+		if ref.Path != nil {
+			out[i] = fmt.Sprintf("%s → %s", ref.Name, *ref.Path)
+		}
+	}
+	return out
+}
+
 // daemonConfigSummary resolves the Daemon's config references the same way the
 // controller does, so describe reports the revision new Procs will carry. A
 // missing Config yields a note rather than an error — describe still prints.
@@ -157,18 +169,19 @@ func daemonConfigSummary(ctx context.Context, c *client.Client, d *v1alpha1.Daem
 		return configSummary{}
 	}
 	tmplHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	names := configRefDisplay(refs)
 	specs := make([]*v1alpha1.ConfigSpec, len(refs))
-	for i, name := range refs {
-		cfg, err := c.GetConfig(ctx, name)
+	for i, ref := range refs {
+		cfg, err := c.GetConfig(ctx, ref.Name)
 		if err != nil {
 			if errors.Is(err, v1alpha1.ErrNotFound) {
-				return configSummary{refs: refs, note: fmt.Sprintf("unresolved: config %q not found", name)}
+				return configSummary{refs: names, note: fmt.Sprintf("unresolved: config %q not found", ref.Name)}
 			}
-			return configSummary{refs: refs, note: fmt.Sprintf("unresolved: %v", err)}
+			return configSummary{refs: names, note: fmt.Sprintf("unresolved: %v", err)}
 		}
 		specs[i] = &cfg.Spec
 	}
-	return configSummary{refs: refs, revision: v1alpha1.HashDaemonRevision(tmplHash, refs, specs)}
+	return configSummary{refs: names, revision: v1alpha1.HashDaemonRevision(tmplHash, refs, specs)}
 }
 
 func describeDaemon(w io.Writer, d *v1alpha1.Daemon, events []v1alpha1.Event, cs configSummary) {
@@ -264,16 +277,40 @@ func describeConfig(w io.Writer, cfg *v1alpha1.Config, events []v1alpha1.Event) 
 	}
 	fmt.Fprintf(w, "Mode:\t%s\n", mode)
 
-	fmt.Fprintf(w, "\nFiles:\n")
-	names := make([]string, 0, len(cfg.Spec.Data))
-	for name := range cfg.Spec.Data {
-		names = append(names, name)
+	// Files listed together (text + binary), each with its resolved mode
+	// (per-file Modes override the Config-wide Mode, M9-c/d). Content is never
+	// shown — `get config -o yaml` shows it (deliberate asymmetry).
+	type fileRow struct {
+		name, size, mode string
+		binary           bool
 	}
-	sort.Strings(names)
+	rows := make([]fileRow, 0, configFileCount(cfg))
+	fileMode := func(name string) string {
+		if m, ok := cfg.Spec.Modes[name]; ok {
+			return m
+		}
+		if cfg.Spec.Mode != nil {
+			return *cfg.Spec.Mode
+		}
+		return "0644"
+	}
+	for name, content := range cfg.Spec.Data {
+		rows = append(rows, fileRow{name: name, size: formatBytes(uint64(len(content))), mode: fileMode(name)})
+	}
+	for name, content := range cfg.Spec.BinaryData {
+		rows = append(rows, fileRow{name: name, size: formatBytes(uint64(len(content))), mode: fileMode(name), binary: true})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].name < rows[j].name })
+
+	fmt.Fprintf(w, "\nFiles:\n")
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "  NAME\tSIZE")
-	for _, name := range names {
-		fmt.Fprintf(tw, "  %s\t%s\n", name, formatBytes(uint64(len(cfg.Spec.Data[name]))))
+	fmt.Fprintln(tw, "  NAME\tSIZE\tMODE\tTYPE")
+	for _, r := range rows {
+		typ := "text"
+		if r.binary {
+			typ = "binary"
+		}
+		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\n", r.name, r.size, r.mode, typ)
 	}
 	tw.Flush()
 
@@ -391,6 +428,15 @@ func describeTimer(w io.Writer, tm *v1alpha1.Timer, events []v1alpha1.Event) {
 	fmt.Fprintf(w, "Created:\t%s\n", formatTime(tm.Metadata.CreationTimestamp))
 
 	fmt.Fprintf(w, "\nSchedule:\t%s\n", tm.Spec.Schedule)
+	if v := tm.Spec.TimeZone; v != nil {
+		fmt.Fprintf(w, "TimeZone:\t%s\n", *v)
+	}
+	if v := tm.Spec.JitterSeconds; v != nil {
+		fmt.Fprintf(w, "JitterSeconds:\t%d\n", *v)
+	}
+	if tm.Spec.CatchUp != nil && *tm.Spec.CatchUp {
+		fmt.Fprintf(w, "CatchUp:\ttrue\n")
+	}
 	suspend := "false"
 	if tm.Spec.Suspend != nil && *tm.Spec.Suspend {
 		suspend = "true"
@@ -406,9 +452,10 @@ func describeTimer(w io.Writer, tm *v1alpha1.Timer, events []v1alpha1.Event) {
 	fmt.Fprintf(w, "Last Successful:\t%s\n", formatTime(tm.Status.LastSuccessfulTime))
 	fmt.Fprintf(w, "Active Proc:\t%s\n", timerActive(tm))
 
-	// Next fire times, computed client-side; unparseable schedules are
-	// rejected at apply, so failure here means skew worth surfacing as-is.
-	if sched, err := cron.ParseStandard(tm.Spec.Schedule); err == nil {
+	// Next fire times, computed client-side in the timer's zone (M9-f);
+	// unparseable schedules are rejected at apply, so failure here means skew
+	// worth surfacing as-is. Jitter is not applied — these are the base ticks.
+	if sched, err := v1alpha1.ParseTimerSchedule(&tm.Spec); err == nil {
 		next := time.Now()
 		fmt.Fprintf(w, "Next Runs:")
 		for range 3 {

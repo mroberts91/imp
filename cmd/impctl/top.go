@@ -21,40 +21,69 @@ const topSampleGap = 1 * time.Second
 
 func newTopCmd(newClient func() *client.Client) *cobra.Command {
 	var noHeaders bool
+	var watch bool
+	var interval int
 	cmd := &cobra.Command{
 		Use:   "top",
 		Short: "Show live CPU/memory usage of running Procs",
 		Long: `Show live per-Proc resource usage read from impd's cgroup stats.
 
-CPU% is computed from two samples one second apart. Under a fake cgroup
-root (rootless ad-hoc mode) values read as zero — limits and accounting
-need a delegated cgroup subtree; see docs/install.md.`,
+CPU% is computed from two samples. With --watch the table repaints every
+--interval seconds (default 2) and CPU% covers that window; otherwise it is
+a single reading one second apart. Under a fake cgroup root (rootless ad-hoc
+mode) values read as zero — limits and accounting need a delegated cgroup
+subtree; see docs/install.md.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if cmd.Flags().Changed("interval") && !watch {
+				return fmt.Errorf("--interval applies only with --watch")
+			}
 			c := newClient()
 			ctx := cmd.Context()
+			out := cmd.OutOrStdout()
+
+			gap := topSampleGap
+			if watch {
+				if interval < 1 {
+					interval = 1
+				}
+				gap = time.Duration(interval) * time.Second
+			}
 
 			first, err := c.Stats(ctx)
 			if err != nil {
 				return err
 			}
-			start := time.Now()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(topSampleGap):
-			}
-			second, err := c.Stats(ctx)
-			if err != nil {
-				return err
-			}
-			elapsed := time.Since(start)
+			for {
+				start := time.Now()
+				select {
+				case <-ctx.Done():
+					if watch {
+						return nil // Ctrl-C is a clean exit while watching
+					}
+					return ctx.Err()
+				case <-time.After(gap):
+				}
+				second, err := c.Stats(ctx)
+				if err != nil {
+					return err
+				}
+				elapsed := time.Since(start)
 
-			printTopTable(cmd.OutOrStdout(), first, second, elapsed, noHeaders)
-			return nil
+				if watch {
+					fmt.Fprint(out, "\033[H\033[2J") // home + clear
+				}
+				printTopTable(out, first, second, elapsed, noHeaders)
+				if !watch {
+					return nil
+				}
+				first = second // previous sample is the next baseline
+			}
 		},
 	}
 	cmd.Flags().BoolVar(&noHeaders, "no-headers", false, "omit the header row")
+	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "continuously repaint (Ctrl-C to exit)")
+	cmd.Flags().IntVar(&interval, "interval", 2, "seconds between repaints in --watch mode (min 1)")
 	return cmd
 }
 
@@ -76,7 +105,7 @@ func printTopTable(w io.Writer, first, second []v1alpha1.ProcStat, elapsed time.
 
 	tw := newTabWriter(w)
 	if !noHeaders {
-		fmt.Fprintln(tw, "NAME\tOWNER\tCPU%\tMEMORY\tPIDS")
+		fmt.Fprintln(tw, "NAME\tOWNER\tCPU%\tMEMORY\tPIDS\tTHROTTLED")
 	}
 	for _, s := range rows {
 		cpu := "-"
@@ -86,9 +115,11 @@ func printTopTable(w io.Writer, first, second []v1alpha1.ProcStat, elapsed time.
 			deltaUsec := float64(s.CPUUsageUsec - p.CPUUsageUsec)
 			cpu = fmt.Sprintf("%.1f", deltaUsec/float64(elapsed.Microseconds())*100)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\n",
+		// THROTTLED is the kernel's cumulative CFS throttled-periods count
+		// (M9-k); 0 without a cpu limit or under a fake cgroup root.
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\n",
 			s.Proc, ownerLabel(s.Owner), cpu,
-			formatBytes(s.MemoryCurrentBytes), s.PidsCurrent)
+			formatBytes(s.MemoryCurrentBytes), s.PidsCurrent, s.NrThrottled)
 	}
 	if len(rows) == 0 {
 		fmt.Fprintln(tw, "No running procs.")

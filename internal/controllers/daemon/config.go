@@ -46,17 +46,17 @@ func (c *Controller) resolveRevision(d *v1alpha1.Daemon) (rev revision, missing 
 		return revision{template: templateHash, config: "", suffix: templateHash}, ""
 	}
 	specs := make([]*v1alpha1.ConfigSpec, len(refs))
-	for i, name := range refs {
-		raw, ok := c.configs.GetByKey(v1alpha1.KindConfig + "/" + name)
+	for i, ref := range refs {
+		raw, ok := c.configs.GetByKey(v1alpha1.KindConfig + "/" + ref.Name)
 		if !ok {
-			return revision{}, name
+			return revision{}, ref.Name
 		}
 		var cfg v1alpha1.Config
 		if err := json.Unmarshal(raw, &cfg); err != nil {
 			// The apiserver validated what it stored; unreadable bytes are
 			// wire corruption. Treat as missing so a resync heals it.
-			c.log.Warn("skipping unreadable config in cache", "kind", v1alpha1.KindConfig, "key", name, "error", err)
-			return revision{}, name
+			c.log.Warn("skipping unreadable config in cache", "kind", v1alpha1.KindConfig, "key", ref.Name, "error", err)
+			return revision{}, ref.Name
 		}
 		specs[i] = &cfg.Spec
 	}
@@ -172,6 +172,10 @@ func EnqueueReferencingDaemons(daemons *cache.Store, q queue.RateLimitingInterfa
 			return
 		}
 		for _, raw := range daemons.List() {
+			// Configs decodes as []ConfigRef so the union's custom unmarshal
+			// handles both bare-string and object-form refs — an object-form
+			// ref must not silently fail to decode, which would break
+			// roll-on-change for daemons that use a path: ref (M9-o).
 			var d struct {
 				Metadata struct {
 					Name string `json:"name"`
@@ -179,7 +183,7 @@ func EnqueueReferencingDaemons(daemons *cache.Store, q queue.RateLimitingInterfa
 				Spec struct {
 					Template struct {
 						Spec struct {
-							Configs []string `json:"configs"`
+							Configs []v1alpha1.ConfigRef `json:"configs"`
 						} `json:"spec"`
 					} `json:"template"`
 				} `json:"spec"`
@@ -188,7 +192,9 @@ func EnqueueReferencingDaemons(daemons *cache.Store, q queue.RateLimitingInterfa
 				log.Warn("skipping daemon with unreadable spec", "error", err)
 				continue
 			}
-			if slices.Contains(d.Spec.Template.Spec.Configs, name) {
+			if slices.ContainsFunc(d.Spec.Template.Spec.Configs, func(r v1alpha1.ConfigRef) bool {
+				return r.Name == name
+			}) {
 				q.Add(v1alpha1.KindDaemon + "/" + d.Metadata.Name)
 			}
 		}

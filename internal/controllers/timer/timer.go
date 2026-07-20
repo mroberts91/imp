@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"maps"
 	"slices"
@@ -111,10 +112,11 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 		return err
 	}
 
-	sched, err := cron.ParseStandard(t.Spec.Schedule)
+	// One author for the CRON_TZ composition, shared with validation (M9-f).
+	sched, err := v1alpha1.ParseTimerSchedule(&t.Spec)
 	if err != nil {
-		// Validation prevents this; a stored unparseable schedule is
-		// permanent — retrying cannot fix it. Surface and stop.
+		// Validation prevents this; a stored unparseable schedule (or timeZone)
+		// is permanent — retrying cannot fix it. Surface and stop.
 		c.emit(ctx, &t, v1alpha1.EventTypeWarning, v1alpha1.ReasonFailedValidation,
 			fmt.Sprintf("unparseable schedule %q: %v", t.Spec.Schedule, err))
 		return c.rollupStatus(ctx, &t, t.Status.LastScheduleTime, active, finished)
@@ -133,7 +135,9 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 	due, overflowed := mostRecentDue(sched, last, now)
 	if overflowed {
 		// Pathologically many missed ticks (long downtime on a tight
-		// schedule): skip them wholesale and resume from now.
+		// schedule): skip them wholesale and resume from now — even under
+		// catchUp (M9-h), a thousand missed ticks still collapse to
+		// resume-from-now rather than firing.
 		c.emit(ctx, &t, v1alpha1.EventTypeWarning, v1alpha1.ReasonMissedRun,
 			fmt.Sprintf("more than %d missed runs; resuming from now", maxMissedTicks))
 		if err := c.rollupStatus(ctx, &t, v1alpha1.NewTime(now), active, finished); err != nil {
@@ -149,18 +153,40 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 		return controllers.RequeueAfter{After: sched.Next(now).Sub(now)}
 	}
 
-	// A tick is due. Too late to fire it?
+	// A tick is due. Jitter shifts the fire time deterministically (M9-g): the
+	// tick's identity (name, scheduledAt, lastScheduleTime) stays the undelayed
+	// `due`, but firing waits until `fireAt` and the deadline is measured from
+	// it. Deterministic so level-triggered re-evaluation of the same tick
+	// computes the same fire time.
+	fireAt := fireTimeFor(sched, t.Metadata.UID, due, t.Spec.JitterSeconds)
+	if now.Before(fireAt) {
+		// Within the jitter delay: wait, without advancing lastScheduleTime.
+		if err := c.rollupStatus(ctx, &t, t.Status.LastScheduleTime, active, finished); err != nil {
+			return err
+		}
+		return controllers.RequeueAfter{After: fireAt.Sub(now)}
+	}
+
+	// Fire time reached. Too late (past the deadline, measured from fireAt)?
 	deadline := defaultStartingDeadline
 	if t.Spec.StartingDeadlineSeconds != nil {
 		deadline = time.Duration(*t.Spec.StartingDeadlineSeconds) * time.Second
 	}
-	if now.Sub(due) > deadline {
-		c.emit(ctx, &t, v1alpha1.EventTypeWarning, v1alpha1.ReasonMissedRun,
-			fmt.Sprintf("missed scheduled run at %s (past deadline)", due.Format(time.RFC3339)))
-		if err := c.rollupStatus(ctx, &t, v1alpha1.NewTime(due), active, finished); err != nil {
-			return err
+	catchUp := false
+	if now.Sub(fireAt) > deadline {
+		// A past-deadline tick is normally skipped (systemd Persistent=false).
+		// With catchUp (M9-h, Persistent=true), fire it once instead —
+		// mostRecentDue already collapsed any downtime gap to this newest tick.
+		if t.Spec.CatchUp != nil && *t.Spec.CatchUp {
+			catchUp = true
+		} else {
+			c.emit(ctx, &t, v1alpha1.EventTypeWarning, v1alpha1.ReasonMissedRun,
+				fmt.Sprintf("missed scheduled run at %s (past deadline)", due.Format(time.RFC3339)))
+			if err := c.rollupStatus(ctx, &t, v1alpha1.NewTime(due), active, finished); err != nil {
+				return err
+			}
+			return controllers.RequeueAfter{After: sched.Next(now).Sub(now)}
 		}
-		return controllers.RequeueAfter{After: sched.Next(now).Sub(now)}
 	}
 
 	if len(active) > 0 {
@@ -198,12 +224,42 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 	if _, err := c.client.ApplyProc(ctx, p); err != nil {
 		return fmt.Errorf("creating run %s: %w", p.Metadata.Name, err)
 	}
-	c.emit(ctx, &t, v1alpha1.EventTypeNormal, v1alpha1.ReasonScheduledRun,
-		fmt.Sprintf("created run %s for tick %s", p.Metadata.Name, due.Format(time.RFC3339)))
+	msg := fmt.Sprintf("created run %s for tick %s", p.Metadata.Name, due.Format(time.RFC3339))
+	if catchUp {
+		msg += " (catch-up after missed tick)"
+	}
+	c.emit(ctx, &t, v1alpha1.EventTypeNormal, v1alpha1.ReasonScheduledRun, msg)
 	if err := c.rollupStatus(ctx, &t, v1alpha1.NewTime(due), active, finished); err != nil {
 		return err
 	}
 	return controllers.RequeueAfter{After: sched.Next(due).Sub(now)}
+}
+
+// fireTimeFor is when a due tick should fire: `due` plus its deterministic
+// jitter, but never at or after the next tick. Capping to `due` when the jitter
+// would overflow keeps an over-jittered tick (jitterSeconds ≥ the schedule
+// interval) from being silently collapsed away by mostRecentDue on the next
+// pass — it fires immediately instead of being lost.
+func fireTimeFor(sched cron.Schedule, uid string, due time.Time, jitterSeconds *int32) time.Time {
+	fireAt := due.Add(jitterFor(uid, due, jitterSeconds))
+	if !fireAt.Before(sched.Next(due)) {
+		return due
+	}
+	return fireAt
+}
+
+// jitterFor returns a deterministic per-tick delay in [0, jitterSeconds)
+// (M9-g): the systemd RandomizedDelaySec analog. Derived from the timer UID and
+// the tick time so every level-triggered re-evaluation of the same tick yields
+// the same fire offset. nil/0 jitter is no delay.
+func jitterFor(uid string, due time.Time, jitterSeconds *int32) time.Duration {
+	if jitterSeconds == nil || *jitterSeconds <= 0 {
+		return 0
+	}
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%s\x00%d", uid, due.Unix())
+	offset := h.Sum64() % uint64(*jitterSeconds)
+	return time.Duration(offset) * time.Second
 }
 
 // mostRecentDue walks the schedule from last and returns the newest tick

@@ -82,6 +82,9 @@ func (in *RollingUpdateDaemonStrategy) DeepCopy() *RollingUpdateDaemonStrategy {
 	if in.Partition != nil {
 		out.Partition = new(*in.Partition)
 	}
+	if in.MaxUnavailable != nil {
+		out.MaxUnavailable = new(*in.MaxUnavailable)
+	}
 	return &out
 }
 
@@ -146,7 +149,15 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 	if in.PrivateTmp != nil {
 		out.PrivateTmp = new(*in.PrivateTmp)
 	}
-	out.Configs = slices.Clone(in.Configs)
+	if in.Configs != nil {
+		out.Configs = make([]ConfigRef, len(in.Configs))
+		for i := range in.Configs {
+			out.Configs[i] = in.Configs[i]
+			if in.Configs[i].Path != nil {
+				out.Configs[i].Path = new(*in.Configs[i].Path)
+			}
+		}
+	}
 	return &out
 }
 
@@ -168,9 +179,16 @@ func (in *ConfigSpec) DeepCopy() *ConfigSpec {
 	}
 	out := *in
 	out.Data = maps.Clone(in.Data)
+	if in.BinaryData != nil {
+		out.BinaryData = make(map[string][]byte, len(in.BinaryData))
+		for k, v := range in.BinaryData {
+			out.BinaryData[k] = slices.Clone(v)
+		}
+	}
 	if in.Mode != nil {
 		out.Mode = new(*in.Mode)
 	}
+	out.Modes = maps.Clone(in.Modes)
 	return &out
 }
 
@@ -236,6 +254,15 @@ func (in *TimerSpec) DeepCopy() *TimerSpec {
 		return nil
 	}
 	out := *in
+	if in.TimeZone != nil {
+		out.TimeZone = new(*in.TimeZone)
+	}
+	if in.JitterSeconds != nil {
+		out.JitterSeconds = new(*in.JitterSeconds)
+	}
+	if in.CatchUp != nil {
+		out.CatchUp = new(*in.CatchUp)
+	}
 	if in.Suspend != nil {
 		out.Suspend = new(*in.Suspend)
 	}
@@ -307,6 +334,9 @@ func (in *Probe) DeepCopy() *Probe {
 	}
 	if in.TCPSocket != nil {
 		out.TCPSocket = new(*in.TCPSocket)
+	}
+	if in.TerminationGracePeriodSeconds != nil {
+		out.TerminationGracePeriodSeconds = new(*in.TerminationGracePeriodSeconds)
 	}
 	return &out
 }

@@ -10,7 +10,7 @@
 package logs
 
 import (
-	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -26,7 +26,16 @@ import (
 )
 
 const (
-	scannerMaxToken = 16 * 1024
+	// readChunk is the per-Read buffer size for copying a stream.
+	readChunk = 4 * 1024
+	// partialThreshold forces a P (partial) flush once this many bytes have
+	// accumulated without a newline. Bounds pump memory and keeps parity with
+	// the old bufio.Scanner token cap.
+	partialThreshold = 16 * 1024
+	// idleFlushDelay is how long unterminated output may sit before it is
+	// flushed as a P record, so `impctl logs` never withholds a line pending a
+	// trailing newline (docs/.local/05 §6).
+	idleFlushDelay = 150 * time.Millisecond
 )
 
 var _ apiserver.LogStreamer = (*Store)(nil)
@@ -144,31 +153,112 @@ type procWriter struct {
 	clock  clock.Clock
 	stdout *io.PipeWriter
 	stderr *io.PipeWriter
-	mu     sync.Mutex
+	mu     sync.Mutex // guards lj: the two streams share one rotated file
 	wg     sync.WaitGroup
 }
 
-// pump copies one stream (stdout/stderr) into the rotated log as CRI lines.
+// writeRecord appends one CRI line: "<ts> <stream> <F|P> <content>\n". content
+// never contains a newline (F splits on it, P is only ever a run without one),
+// so the trailing '\n' is an unambiguous record delimiter. Holds mu because
+// stdout and stderr write to the same lumberjack file.
+func (pw *procWriter) writeRecord(stream, tag string, content []byte) {
+	ts := pw.clock.Now().UTC().Format(time.RFC3339Nano)
+	pw.mu.Lock()
+	_, _ = fmt.Fprintf(pw.lj, "%s %s %s %s\n", ts, stream, tag, content)
+	pw.mu.Unlock()
+}
+
+// pump copies one stream (stdout/stderr) into the rotated log as CRI lines,
+// never withholding output pending a trailing newline. Shape is a logical
+// fork of pkg/kubelet's log writer: emit an F (full) record per complete line;
+// a run without a newline is flushed as a P (partial) record on a 150 ms idle
+// timer or once partialThreshold bytes accumulate; EOF flushes the remainder
+// as F. The read path (tail.go) concatenates by re-adding a newline for F only.
 //
-// KNOWN BUG (see docs/.local/05-implementation-progress.md §6): the
-// bufio.Scanner (default ScanLines) emits a line lacking a trailing '\n' only
-// at EOF. While the child keeps this stream open, buffered-but-unterminated
-// bytes block inside sc.Scan() and never reach lumberjack — which creates
-// current.log lazily on first write — so a long-lived process whose output
-// does not end in a newline shows NOTHING in `impctl logs` (and, if that is
-// its only output, the file never exists and the log route 404s). Fix
-// direction: read bytes in chunks and emit CRI 'F' on newline / 'P' on an
-// idle-timer or buffer-threshold flush (kubelet kuberuntime/logs shape), so no
-// output is ever withheld pending a newline.
+// A blocking Read cannot be select'd against the idle timer, so an inner
+// goroutine feeds chunks over a channel and this goroutine owns pending +
+// timer in one select loop. It returns only after the reader closes the
+// channel (EOF), so CloseCapture's wg.Wait() sees no writes after it returns.
 func (pw *procWriter) pump(r *io.PipeReader, stream string) {
 	defer r.Close()
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, scannerMaxToken), scannerMaxToken)
-	for sc.Scan() {
-		line := sc.Text()
-		ts := pw.clock.Now().UTC().Format(time.RFC3339Nano)
-		pw.mu.Lock()
-		_, _ = fmt.Fprintf(pw.lj, "%s %s F %s\n", ts, stream, line)
-		pw.mu.Unlock()
+
+	chunks := make(chan []byte)
+	go func() {
+		defer close(chunks)
+		buf := make([]byte, readChunk)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				chunks <- bytes.Clone(buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	var pending []byte
+	// unterminated is true when the last record emitted for this stream was a P
+	// (an incomplete line left dangling by an idle/threshold flush). At EOF such
+	// a line is completed with a terminating F so the rendered output ends in a
+	// newline, matching the pre-M9 Scanner.
+	unterminated := false
+	var idle clock.Timer
+	var idleC <-chan time.Time
+	arm := func() { // (re)start the idle countdown for the current pending run
+		if idle != nil {
+			idle.Stop()
+		}
+		idle = pw.clock.NewTimer(idleFlushDelay)
+		idleC = idle.C()
+	}
+	disarm := func() {
+		if idle != nil {
+			idle.Stop()
+			idle, idleC = nil, nil
+		}
+	}
+
+	for {
+		select {
+		case b, ok := <-chunks:
+			if !ok { // EOF
+				switch {
+				case len(pending) > 0:
+					pw.writeRecord(stream, "F", pending) // completes the line
+				case unterminated:
+					pw.writeRecord(stream, "F", nil) // terminate a dangling P line
+				}
+				disarm()
+				return
+			}
+			pending = append(pending, b...)
+			for { // every complete line becomes an F record
+				i := bytes.IndexByte(pending, '\n')
+				if i < 0 {
+					break
+				}
+				pw.writeRecord(stream, "F", pending[:i])
+				pending = pending[i+1:]
+				unterminated = false
+			}
+			for len(pending) >= partialThreshold { // bound memory: force P flushes
+				pw.writeRecord(stream, "P", pending[:partialThreshold])
+				pending = pending[partialThreshold:]
+				unterminated = true
+			}
+			if len(pending) > 0 {
+				arm()
+			} else {
+				disarm()
+			}
+		case <-idleC:
+			if len(pending) > 0 {
+				pw.writeRecord(stream, "P", pending)
+				pending = nil
+				unterminated = true
+			}
+			disarm()
+		}
 	}
 }

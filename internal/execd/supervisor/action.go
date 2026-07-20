@@ -88,6 +88,12 @@ type RuntimeRecord struct {
 	ReadinessOK       bool
 	ReadinessFailed   bool // failure threshold crossed (not merely initial Failure)
 	LivenessFailed    bool
+	// ProbeKillGrace is the terminationGracePeriodSeconds of the liveness or
+	// startup probe that latched LivenessFailed (M9-l); nil when the probe set
+	// none or the latch was set by something else. It overrides the Proc's grace
+	// for that probe-triggered kill only. Coupled to LivenessFailed: cleared
+	// wherever that latch is.
+	ProbeKillGrace *int64
 
 	// Startup gate (M6): while HasStartupProbe && !StartupDone, liveness and
 	// readiness workers are held and Ready projects False/ProbePending.

@@ -15,8 +15,8 @@ func (c *Client) GetDaemon(ctx context.Context, name string) (*v1alpha1.Daemon, 
 	return get[v1alpha1.Daemon](ctx, c, v1alpha1.KindDaemon, name)
 }
 
-func (c *Client) ListDaemons(ctx context.Context) ([]v1alpha1.Daemon, string, error) {
-	return list[v1alpha1.Daemon](ctx, c, v1alpha1.KindDaemon)
+func (c *Client) ListDaemons(ctx context.Context, opts ...ListOption) ([]v1alpha1.Daemon, string, error) {
+	return list[v1alpha1.Daemon](ctx, c, v1alpha1.KindDaemon, opts...)
 }
 
 func (c *Client) ApplyDaemon(ctx context.Context, d *v1alpha1.Daemon) (*v1alpha1.Daemon, error) {
@@ -35,8 +35,8 @@ func (c *Client) GetProc(ctx context.Context, name string) (*v1alpha1.Proc, erro
 	return get[v1alpha1.Proc](ctx, c, v1alpha1.KindProc, name)
 }
 
-func (c *Client) ListProcs(ctx context.Context) ([]v1alpha1.Proc, string, error) {
-	return list[v1alpha1.Proc](ctx, c, v1alpha1.KindProc)
+func (c *Client) ListProcs(ctx context.Context, opts ...ListOption) ([]v1alpha1.Proc, string, error) {
+	return list[v1alpha1.Proc](ctx, c, v1alpha1.KindProc, opts...)
 }
 
 func (c *Client) ApplyProc(ctx context.Context, p *v1alpha1.Proc) (*v1alpha1.Proc, error) {
@@ -55,8 +55,8 @@ func (c *Client) GetEvent(ctx context.Context, name string) (*v1alpha1.Event, er
 	return get[v1alpha1.Event](ctx, c, v1alpha1.KindEvent, name)
 }
 
-func (c *Client) ListEvents(ctx context.Context) ([]v1alpha1.Event, string, error) {
-	return list[v1alpha1.Event](ctx, c, v1alpha1.KindEvent)
+func (c *Client) ListEvents(ctx context.Context, opts ...ListOption) ([]v1alpha1.Event, string, error) {
+	return list[v1alpha1.Event](ctx, c, v1alpha1.KindEvent, opts...)
 }
 
 func (c *Client) ApplyEvent(ctx context.Context, e *v1alpha1.Event) (*v1alpha1.Event, error) {
@@ -79,8 +79,8 @@ func get[T object](ctx context.Context, c *Client, kind, name string) (*T, error
 	return decodeInto[T](raw)
 }
 
-func list[T object](ctx context.Context, c *Client, kind string) ([]T, string, error) {
-	l, err := c.ListRaw(ctx, kind)
+func list[T object](ctx context.Context, c *Client, kind string, opts ...ListOption) ([]T, string, error) {
+	l, err := c.ListRaw(ctx, kind, opts...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -159,8 +159,8 @@ func (c *Client) GetTimer(ctx context.Context, name string) (*v1alpha1.Timer, er
 	return get[v1alpha1.Timer](ctx, c, v1alpha1.KindTimer, name)
 }
 
-func (c *Client) ListTimers(ctx context.Context) ([]v1alpha1.Timer, string, error) {
-	return list[v1alpha1.Timer](ctx, c, v1alpha1.KindTimer)
+func (c *Client) ListTimers(ctx context.Context, opts ...ListOption) ([]v1alpha1.Timer, string, error) {
+	return list[v1alpha1.Timer](ctx, c, v1alpha1.KindTimer, opts...)
 }
 
 func (c *Client) ApplyTimer(ctx context.Context, t *v1alpha1.Timer) (*v1alpha1.Timer, error) {
@@ -179,8 +179,8 @@ func (c *Client) GetConfig(ctx context.Context, name string) (*v1alpha1.Config, 
 	return get[v1alpha1.Config](ctx, c, v1alpha1.KindConfig, name)
 }
 
-func (c *Client) ListConfigs(ctx context.Context) ([]v1alpha1.Config, string, error) {
-	return list[v1alpha1.Config](ctx, c, v1alpha1.KindConfig)
+func (c *Client) ListConfigs(ctx context.Context, opts ...ListOption) ([]v1alpha1.Config, string, error) {
+	return list[v1alpha1.Config](ctx, c, v1alpha1.KindConfig, opts...)
 }
 
 func (c *Client) ApplyConfig(ctx context.Context, cfg *v1alpha1.Config) (*v1alpha1.Config, error) {

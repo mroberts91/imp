@@ -665,6 +665,200 @@ func TestReconcileRollingUpdateSequential(t *testing.T) {
 	t.Fatalf("rolling update did not complete; procs=%v", procNames(listProcsSorted(t, h)))
 }
 
+// rollingStrategy builds a RollingUpdate strategy with an explicit
+// maxUnavailable and partition (M9-e).
+func rollingStrategy(maxUnavailable, partition int32) v1alpha1.UpdateStrategy {
+	return v1alpha1.UpdateStrategy{
+		Type: v1alpha1.UpdateStrategyRollingUpdate,
+		RollingUpdate: &v1alpha1.RollingUpdateDaemonStrategy{
+			MaxUnavailable: new(maxUnavailable),
+			Partition:      new(partition),
+		},
+	}
+}
+
+// staleCount counts procs still labeled with oldHash.
+func staleCount(procs []v1alpha1.Proc, oldHash string) int {
+	n := 0
+	for i := range procs {
+		if procs[i].Metadata.Labels[v1alpha1.LabelTemplateHash] == oldHash {
+			n++
+		}
+	}
+	return n
+}
+
+// rollTemplate mutates the Daemon's command and applies it, returning the new
+// template hash.
+func rollTemplate(t *testing.T, h *harness) string {
+	t.Helper()
+	ctx := t.Context()
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	d.Spec.Template.Spec.Command = []string{"/bin/sleep", "120"}
+	if _, err := h.cl.ApplyDaemon(ctx, d); err != nil {
+		t.Fatalf("ApplyDaemon(template change): %v", err)
+	}
+	h.waitCaughtUp(t)
+	d, err = h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	return v1alpha1.HashProcTemplate(&d.Spec.Template)
+}
+
+// TestReconcileRollingUpdateMaxUnavailableOnePin pins the M9-e identity: an
+// explicit maxUnavailable:1 rolls byte-for-byte like the nil default — exactly
+// one stale (the highest ordinal) deleted per pass.
+func TestReconcileRollingUpdateMaxUnavailableOnePin(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemonOpts(t, h, 3, rollingStrategy(1, 0))
+	h.reconcileUntilSteady(t, "Daemon/web")
+	markProcsReady(t, h)
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	oldHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	_ = rollTemplate(t, h)
+
+	var requeue controllers.RequeueAfter
+	if err := h.c.Reconcile(ctx, "Daemon/web"); !errors.As(err, &requeue) {
+		t.Fatalf("pass 1 returned %v, want RequeueAfter", err)
+	}
+	h.waitCaughtUp(t)
+	procs := listProcsSorted(t, h)
+	if len(procs) != 2 || staleCount(procs, oldHash) != 2 {
+		t.Fatalf("explicit maxUnavailable:1 deleted != 1 proc: procs=%v", procNames(procs))
+	}
+	for _, p := range procs {
+		if p.Metadata.Labels[v1alpha1.LabelReplicaIndex] == "2" {
+			t.Fatalf("ordinal 2 (highest) should have been the single deletion")
+		}
+	}
+}
+
+// TestReconcileRollingUpdateMaxUnavailableBatched pins M9-e: replicas=4 with
+// maxUnavailable:2 deletes two stale at once, then holds while the two
+// replacements are unavailable (the budget-exhausted "freeze"), then rolls the
+// next pair — never more than two ordinals down at once.
+func TestReconcileRollingUpdateMaxUnavailableBatched(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemonOpts(t, h, 4, rollingStrategy(2, 0))
+	h.reconcileUntilSteady(t, "Daemon/web")
+	markProcsReady(t, h)
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	oldHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	newHash := rollTemplate(t, h)
+
+	// Pass 1: exactly two stale deleted (the two highest ordinals).
+	var requeue controllers.RequeueAfter
+	if err := h.c.Reconcile(ctx, "Daemon/web"); !errors.As(err, &requeue) {
+		t.Fatalf("pass 1 returned %v, want RequeueAfter", err)
+	}
+	h.waitCaughtUp(t)
+	procs := listProcsSorted(t, h)
+	if len(procs) != 2 || staleCount(procs, oldHash) != 2 {
+		t.Fatalf("after pass 1: procs=%v, want 2 stale (ordinals 0,1)", procNames(procs))
+	}
+	for _, p := range procs {
+		if idx := p.Metadata.Labels[v1alpha1.LabelReplicaIndex]; idx == "2" || idx == "3" {
+			t.Fatalf("ordinal %s not deleted in pass 1", idx)
+		}
+	}
+
+	// Pass 2: creation pass fills ordinals 2,3 with new (not-ready) Procs.
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("pass 2: %v", err)
+	}
+	h.waitCaughtUp(t)
+	if procs = listProcsSorted(t, h); len(procs) != 4 || staleCount(procs, oldHash) != 2 {
+		t.Fatalf("after pass 2: procs=%v, want 2 stale + 2 new", procNames(procs))
+	}
+
+	// Pass 3: the two replacements are unavailable, so the budget is exhausted
+	// by unavailability — no further stale deleted (the freeze).
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("pass 3: %v", err)
+	}
+	h.waitCaughtUp(t)
+	if staleCount(listProcsSorted(t, h), oldHash) != 2 {
+		t.Fatalf("pass 3 deleted stale while replacements were unavailable: %v", procNames(listProcsSorted(t, h)))
+	}
+
+	// Replacements ready → the next pass deletes the last two stale.
+	markProcsReady(t, h, "web-2-"+newHash, "web-3-"+newHash)
+	if err := h.c.Reconcile(ctx, "Daemon/web"); !errors.As(err, &requeue) {
+		t.Fatalf("pass 4 returned %v, want RequeueAfter", err)
+	}
+	h.waitCaughtUp(t)
+	if staleCount(listProcsSorted(t, h), oldHash) != 0 {
+		t.Fatalf("pass 4 did not delete both remaining stale: %v", procNames(listProcsSorted(t, h)))
+	}
+
+	// Drive to completion.
+	for range 15 {
+		h.waitCaughtUp(t)
+		if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+		h.waitCaughtUp(t)
+		markProcsReady(t, h)
+		d, err := h.cl.GetDaemon(ctx, "web")
+		if err != nil {
+			t.Fatalf("GetDaemon: %v", err)
+		}
+		prog := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeProgressing)
+		if d.Status.UpdatedReplicas == 4 && d.Status.ReadyReplicas == 4 && prog != nil && prog.Reason == reasonProcsAvailable {
+			return
+		}
+	}
+	t.Fatalf("batched rolling update did not complete; procs=%v", procNames(listProcsSorted(t, h)))
+}
+
+// TestReconcileRollingUpdateMaxUnavailableAll pins M9-e: maxUnavailable ≥
+// replicas rolls every ordinal at once, but never touches ordinals below the
+// partition.
+func TestReconcileRollingUpdateMaxUnavailableAll(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyDaemonOpts(t, h, 4, rollingStrategy(4, 1)) // mu == replicas, partition 1
+	h.reconcileUntilSteady(t, "Daemon/web")
+	markProcsReady(t, h)
+
+	d, err := h.cl.GetDaemon(ctx, "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	oldHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	_ = rollTemplate(t, h)
+
+	// One pass rolls ordinals 1..3 (three deletions), leaving ordinal 0 (below
+	// the partition) untouched on the old hash.
+	var requeue controllers.RequeueAfter
+	if err := h.c.Reconcile(ctx, "Daemon/web"); !errors.As(err, &requeue) {
+		t.Fatalf("pass 1 returned %v, want RequeueAfter", err)
+	}
+	h.waitCaughtUp(t)
+	procs := listProcsSorted(t, h)
+	if len(procs) != 1 {
+		t.Fatalf("mu>=replicas pass left %d procs, want 1 (ordinal 0 only): %v", len(procs), procNames(procs))
+	}
+	if procs[0].Metadata.Labels[v1alpha1.LabelReplicaIndex] != "0" ||
+		procs[0].Metadata.Labels[v1alpha1.LabelTemplateHash] != oldHash {
+		t.Fatalf("remaining proc = %s, want ordinal 0 on the old hash (below the partition)", procs[0].Metadata.Name)
+	}
+}
+
 func TestReconcileRollingUpdatePartition(t *testing.T) {
 	h := startHarness(t)
 	ctx := t.Context()
@@ -752,7 +946,7 @@ func applyNamedDaemonWithConfigs(t *testing.T, h *harness, name string, replicas
 			Replicas: new(replicas),
 			Template: v1alpha1.ProcTemplate{
 				Metadata: v1alpha1.TemplateMeta{Labels: map[string]string{"app": name}},
-				Spec:     v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}, Configs: configs},
+				Spec:     v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}, Configs: configRefsOf(configs...)},
 			},
 		},
 	}
@@ -773,15 +967,28 @@ func wantRevision(t *testing.T, h *harness, daemon string, configs ...string) (t
 		t.Fatalf("GetDaemon(%s): %v", daemon, err)
 	}
 	templateHash = v1alpha1.HashProcTemplate(&d.Spec.Template)
-	refs := make([]v1alpha1.ConfigRef, 0, len(configs))
+	refs := make([]v1alpha1.RevisionRef, 0, len(configs))
 	for _, name := range configs {
 		cfg, err := h.cl.GetConfig(ctx, name)
 		if err != nil {
 			t.Fatalf("GetConfig(%s): %v", name, err)
 		}
-		refs = append(refs, v1alpha1.ConfigRef{Name: name, Hash: v1alpha1.HashConfigSpec(&cfg.Spec)})
+		refs = append(refs, v1alpha1.RevisionRef{Name: name, Hash: v1alpha1.HashConfigSpec(&cfg.Spec)})
 	}
 	return templateHash, v1alpha1.HashConfigRevision(templateHash, refs)
+}
+
+// configRefsOf builds bare-name ConfigRefs (no path) from config names, so the
+// test helpers keep their string-variadic ergonomics after the union type.
+func configRefsOf(names ...string) []v1alpha1.ConfigRef {
+	if len(names) == 0 {
+		return nil
+	}
+	refs := make([]v1alpha1.ConfigRef, len(names))
+	for i, n := range names {
+		refs[i] = v1alpha1.ConfigRef{Name: n}
+	}
+	return refs
 }
 
 // TestReconcileConfigRevisionIdentity pins M8-g: a Daemon referencing a Config
@@ -930,6 +1137,42 @@ func TestEnqueueReferencingDaemons(t *testing.T) {
 	enqueue("Config/unreferenced")
 	if q.Len() != 0 {
 		t.Errorf("unreferenced Config enqueued %d daemons, want 0", q.Len())
+	}
+}
+
+// TestEnqueueReferencingDaemonsObjectForm is the M9-o regression: a daemon
+// whose config ref uses the object form ({name, path}) must still enqueue on a
+// Config event. A naive []string decode would fail to unmarshal the object and
+// silently skip the daemon, breaking roll-on-change for path: refs.
+func TestEnqueueReferencingDaemonsObjectForm(t *testing.T) {
+	h := startHarness(t)
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: "web"},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas: new(int32(1)),
+			Template: v1alpha1.ProcTemplate{
+				Spec: v1alpha1.ProcTemplateSpec{
+					Command: []string{"/bin/sleep", "60"},
+					Configs: []v1alpha1.ConfigRef{{Name: "app", Path: new("/etc/app")}},
+				},
+			},
+		},
+	}
+	if _, err := h.cl.ApplyDaemon(t.Context(), d); err != nil {
+		t.Fatalf("ApplyDaemon: %v", err)
+	}
+	h.waitCaughtUp(t)
+
+	q := queue.NewRateLimiting(queue.DefaultRateLimiter())
+	defer q.ShutDown()
+	enqueue := EnqueueReferencingDaemons(h.daemons, q)
+
+	enqueue("Config/app")
+	if q.Len() != 1 {
+		t.Fatalf("object-form config ref not enqueued (q.Len()=%d) — union decode regressed", q.Len())
+	}
+	if key, _ := q.Get(); key != "Daemon/web" {
+		t.Errorf("enqueued %q, want Daemon/web", key)
 	}
 }
 

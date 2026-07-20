@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/robfig/cron/v3"
+
 	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/apiserver"
 	"github.com/mroberts91/imp/internal/cache"
@@ -329,6 +331,143 @@ func TestTimerMissedTickSkipped(t *testing.T) {
 		t.Error("missed tick did not advance lastScheduleTime")
 	}
 	waitFor(t, "MissedRun event", func() bool { return hasEvent(t, h, v1alpha1.ReasonMissedRun) })
+}
+
+// TestJitterForDeterministic pins M9-g's core property: the per-tick jitter is
+// deterministic (same UID + tick → same offset), bounded to [0, jitterSeconds),
+// and nil/zero means no delay.
+func TestJitterForDeterministic(t *testing.T) {
+	due := time.Unix(1_800_000_000, 0)
+	j := int32(300)
+	d1 := jitterFor("uid-abc", due, &j)
+	if d2 := jitterFor("uid-abc", due, &j); d1 != d2 {
+		t.Errorf("jitter not deterministic: %v != %v", d1, d2)
+	}
+	if d1 < 0 || d1 >= time.Duration(j)*time.Second {
+		t.Errorf("jitter %v out of [0, %ds)", d1, j)
+	}
+	if jitterFor("uid", due, nil) != 0 {
+		t.Error("nil jitterSeconds gave a nonzero delay")
+	}
+	zero := int32(0)
+	if jitterFor("uid", due, &zero) != 0 {
+		t.Error("zero jitterSeconds gave a nonzero delay")
+	}
+}
+
+// TestFireTimeForNeverPastNextTick pins the jitter cap (finding fix): the
+// deterministic fire time is always in [due, next), so an over-large
+// jitterSeconds cannot push a tick to/after the next tick and get it silently
+// collapsed. Swept across many ticks (hence many random offsets) with a jitter
+// far larger than the interval.
+func TestFireTimeForNeverPastNextTick(t *testing.T) {
+	sched, err := cron.ParseStandard("@every 5s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := int32(100) // >> the 5s interval
+	sawCapped := false
+	for i := range 1000 {
+		due := time.Unix(1_800_000_000+int64(i), 0)
+		got := fireTimeFor(sched, "timer-uid", due, &big)
+		next := sched.Next(due)
+		if got.Before(due) || !got.Before(next) {
+			t.Fatalf("fireTimeFor at due=%v = %v, want in [due, next=%v)", due, got, next)
+		}
+		if got.Equal(due) {
+			sawCapped = true // the cap fired for at least some offsets
+		}
+	}
+	if !sawCapped {
+		t.Error("expected the cap to fire for some over-jittered ticks")
+	}
+	// nil jitter is exactly `due` (no delay, unchanged pre-M9 behavior).
+	due := time.Unix(1_800_000_000, 0)
+	if got := fireTimeFor(sched, "uid", due, nil); !got.Equal(due) {
+		t.Errorf("nil jitter fireTimeFor = %v, want due=%v", got, due)
+	}
+}
+
+// TestTimerJitterDelaysFire pins M9-g end to end: a due tick does not fire until
+// its deterministic fireAt (due + jitter), and repeated passes of the same tick
+// wait identically.
+func TestTimerJitterDelaysFire(t *testing.T) {
+	h := startHarness(t)
+	j := int32(600)
+	applied := applyTimer(t, h, func(tm *v1alpha1.Timer) {
+		tm.Spec.JitterSeconds = &j
+		tm.Spec.StartingDeadlineSeconds = new(int64(3600)) // generous: jitter never "misses"
+	})
+	sched, err := v1alpha1.ParseTimerSchedule(&applied.Spec)
+	if err != nil {
+		t.Fatalf("ParseTimerSchedule: %v", err)
+	}
+
+	h.clk.Step(time.Hour + time.Second) // just past the first tick
+	now := h.clk.Now()
+	due, _ := mostRecentDue(sched, applied.Metadata.CreationTimestamp.Time, now)
+	if due.IsZero() {
+		t.Fatal("expected a due tick after stepping past 1h")
+	}
+	offset := jitterFor(applied.Metadata.UID, due, &j)
+	fireAt := due.Add(offset)
+
+	if now.Before(fireAt) {
+		// Inside the jitter window: two passes must both hold (deterministic).
+		var rq controllers.RequeueAfter
+		for pass := range 2 {
+			if err := reconcile(t, h); !errors.As(err, &rq) {
+				t.Fatalf("in-jitter pass %d = %v, want RequeueAfter", pass, err)
+			}
+			if len(listRuns(t, h)) != 0 {
+				t.Fatalf("run fired during the jitter delay (pass %d)", pass)
+			}
+		}
+	}
+
+	// Step past fireAt: the tick fires exactly once.
+	h.clk.Step(fireAt.Sub(h.clk.Now()) + time.Second)
+	var rq controllers.RequeueAfter
+	if err := reconcile(t, h); err != nil && !errors.As(err, &rq) {
+		t.Fatalf("fire pass = %v", err)
+	}
+	if runs := listRuns(t, h); len(runs) != 1 {
+		t.Fatalf("after fireAt: got %d runs, want 1", len(runs))
+	}
+}
+
+// TestTimerCatchUpFiresMissedTick pins M9-h: a past-deadline tick that would be
+// skipped without catchUp fires exactly one catch-up run instead, then does not
+// re-fire (lastScheduleTime advances).
+func TestTimerCatchUpFiresMissedTick(t *testing.T) {
+	h := startHarness(t)
+	applyTimer(t, h, func(tm *v1alpha1.Timer) {
+		tm.Spec.CatchUp = new(true)
+		tm.Spec.StartingDeadlineSeconds = new(int64(10))
+	})
+
+	// Long "downtime": the newest missed tick is well past the 10s deadline.
+	h.clk.Step(3*time.Hour + 30*time.Second)
+	var rq controllers.RequeueAfter
+	if err := reconcile(t, h); err != nil && !errors.As(err, &rq) {
+		t.Fatalf("catch-up reconcile = %v", err)
+	}
+	if runs := listRuns(t, h); len(runs) != 1 {
+		t.Fatalf("catchUp fired %d runs, want exactly 1", len(runs))
+	}
+	waitFor(t, "ScheduledRun event", func() bool { return hasEvent(t, h, v1alpha1.ReasonScheduledRun) })
+	if hasEvent(t, h, v1alpha1.ReasonMissedRun) {
+		t.Error("catchUp emitted MissedRun; it should fire, not skip")
+	}
+
+	// A second pass at the same instant does not re-fire (tick collapsed to the
+	// newest, lastScheduleTime advanced).
+	if err := reconcile(t, h); err != nil && !errors.As(err, &rq) {
+		t.Fatalf("second reconcile = %v", err)
+	}
+	if runs := listRuns(t, h); len(runs) != 1 {
+		t.Fatalf("catchUp re-fired on the second pass; got %d runs, want 1", len(runs))
+	}
 }
 
 func TestTimerSuspend(t *testing.T) {

@@ -30,7 +30,12 @@ type ProcStat struct {
 	CPUUsageUsec       uint64    `json:"cpuUsageUsec"`
 	MemoryCurrentBytes uint64    `json:"memoryCurrentBytes"`
 	PidsCurrent        uint64    `json:"pidsCurrent"`
-	SampledAt          Time      `json:"sampledAt,omitzero"`
+	// NrThrottled / ThrottledUsec are cumulative cpu.stat throttling counters
+	// (M9-k): how many enforcement periods the cgroup was throttled, and for
+	// how long in total. Best-effort — 0 when the kernel omits the lines.
+	NrThrottled   uint64 `json:"nrThrottled"`
+	ThrottledUsec uint64 `json:"throttledUsec"`
+	SampledAt     Time   `json:"sampledAt,omitzero"`
 }
 
 // StatsList is the wire shape of the /stats response.

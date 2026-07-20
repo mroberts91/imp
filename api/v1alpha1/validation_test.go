@@ -478,23 +478,61 @@ func TestValidateDaemon(t *testing.T) {
 		},
 		{
 			name:       "config ref ok",
-			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{"app", "shared"} },
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "app"}, {Name: "shared"}} },
 			wantFields: nil,
 		},
 		{
 			name:       "config ref empty",
-			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{""} },
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []ConfigRef{{Name: ""}} },
 			wantFields: []string{"spec.template.spec.configs[0]"},
 		},
 		{
 			name:       "config ref uppercase",
-			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{"App"} },
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "App"}} },
 			wantFields: []string{"spec.template.spec.configs[0]"},
 		},
 		{
 			name:       "config ref duplicate",
-			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{"app", "app"} },
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "app"}, {Name: "app"}} },
 			wantFields: []string{"spec.template.spec.configs[1]"},
+		},
+		{
+			name: "config ref path ok",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "app", Path: new("/etc/app")}}
+			},
+			wantFields: nil,
+		},
+		{
+			name: "config ref path relative",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "app", Path: new("etc/app")}}
+			},
+			wantFields: []string{"spec.template.spec.configs[0].path"},
+		},
+		{
+			name: "config ref path unclean",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "app", Path: new("/etc/app/")}}
+			},
+			wantFields: []string{"spec.template.spec.configs[0].path"},
+		},
+		{
+			name: "config ref path root",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Configs = []ConfigRef{{Name: "app", Path: new("/")}}
+			},
+			wantFields: []string{"spec.template.spec.configs[0].path"},
+		},
+		{
+			name: "config ref path collision",
+			mutate: func(d *Daemon) {
+				d.Spec.Template.Spec.Configs = []ConfigRef{
+					{Name: "app", Path: new("/etc/shared")},
+					{Name: "other", Path: new("/etc/shared")},
+				}
+			},
+			wantFields: []string{"spec.template.spec.configs[1].path"},
 		},
 		{
 			name:       "negative minReadySeconds",

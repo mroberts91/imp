@@ -239,6 +239,50 @@ func TestLivenessRestarts(t *testing.T) {
 		got.Status.RestartCount, got.Status.Phase)
 }
 
+// TestProbeKillGrace pins M9-l: a liveness probe's terminationGracePeriodSeconds
+// governs the probe-triggered kill, overriding the Proc's own grace. The Proc
+// ignores SIGTERM and has a 30s grace, but the probe's 1s grace makes the
+// SIGKILL — and the restart — happen within seconds, not ~30s.
+func TestProbeKillGrace(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "grace-probe-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sh", "-c", `trap "" TERM INT; while true; do sleep 1; done`},
+			RestartPolicy:                 v1alpha1.RestartPolicyAlways,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(30)), // long Proc grace
+			LivenessProbe: &v1alpha1.Probe{
+				Exec:                          &v1alpha1.ExecAction{Command: []string{"/bin/false"}},
+				InitialDelaySeconds:           0,
+				PeriodSeconds:                 1,
+				TimeoutSeconds:                1,
+				SuccessThreshold:              1,
+				FailureThreshold:              1,
+				TerminationGracePeriodSeconds: new(int64(1)), // probe grace wins
+			},
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	first := waitPhase(t, h.cl, "grace-probe-0", v1alpha1.ProcPhaseRunning)
+	firstPID := first.Status.State.Running.PID
+
+	deadline := time.Now().Add(12 * time.Second)
+	for time.Now().Before(deadline) {
+		got, err := h.cl.GetProc(ctx, "grace-probe-0")
+		if err == nil && got.Status.RestartCount >= 1 &&
+			(got.Status.State.Running == nil || got.Status.State.Running.PID != firstPID) {
+			return // restarted quickly — the probe's 1s grace was applied
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("probe-grace kill did not restart within 12s; the probe's terminationGracePeriodSeconds was not applied (Proc's 30s grace was used)")
+}
+
 func TestSpawnAppliesCgroupLimits(t *testing.T) {
 	h := startHarness(t)
 	ctx := t.Context()
@@ -428,7 +472,7 @@ func TestConfigMaterializedAndReadable(t *testing.T) {
 		Metadata: v1alpha1.ObjectMeta{Name: "cfg-reader-0"},
 		Spec: v1alpha1.ProcSpec{
 			Command:                       []string{"/bin/sh", "-c", `cat "$IMP_CONFIG_DIR/app/greeting"; sleep 30`},
-			Configs:                       []string{"app"},
+			Configs:                       []v1alpha1.ConfigRef{{Name: "app"}},
 			RestartPolicy:                 v1alpha1.RestartPolicyNever,
 			StopSignal:                    "TERM",
 			TerminationGracePeriodSeconds: new(int64(2)),
@@ -487,4 +531,42 @@ func TestLogsCapture(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("logs did not contain hello-imp; got %q", body)
+}
+
+// TestLogsCapturePartialLine is the log-pump bug's acceptance-shaped
+// regression (docs/.local/05 §6): a Proc that prints output with no trailing
+// newline and keeps running must still have that output visible in `impctl
+// logs` — before it exits — via the idle-timer P flush.
+func TestLogsCapturePartialLine(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "printf-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sh", "-c", "printf hello; sleep 5"},
+			RestartPolicy:                 v1alpha1.RestartPolicyNever,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(2)),
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	waitPhase(t, h.cl, "printf-0", v1alpha1.ProcPhaseRunning)
+
+	deadline := time.Now().Add(3 * time.Second)
+	var body []byte
+	for time.Now().Before(deadline) {
+		rc, err := h.cl.ProcLogs(ctx, "printf-0", client.LogOptions{})
+		if err == nil {
+			body, _ = io.ReadAll(rc)
+			rc.Close()
+			if strings.Contains(string(body), "hello") {
+				return // visible while the proc is still running — the fix
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("unterminated output not visible before exit; got %q", body)
 }

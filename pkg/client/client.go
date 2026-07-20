@@ -69,10 +69,31 @@ func (c *Client) GetRaw(ctx context.Context, kind, name string) (json.RawMessage
 	return c.doJSON(ctx, http.MethodGet, path, nil)
 }
 
-func (c *Client) ListRaw(ctx context.Context, kind string) (*v1alpha1.ObjectList, error) {
+// ListOption customizes a list request's query string. Options are list-only;
+// watch ignores them (informers filter client-side, M9-i).
+type ListOption func(url.Values)
+
+// WithLabelSelector filters a list to objects whose labels satisfy sel — a
+// comma-joined set of equality terms (k=v, k==v, k!=v). Empty sel is a no-op.
+func WithLabelSelector(sel string) ListOption {
+	return func(q url.Values) {
+		if sel != "" {
+			q.Set("labelSelector", sel)
+		}
+	}
+}
+
+func (c *Client) ListRaw(ctx context.Context, kind string, opts ...ListOption) (*v1alpha1.ObjectList, error) {
 	path, err := resourcePath(kind, "")
 	if err != nil {
 		return nil, err
+	}
+	q := url.Values{}
+	for _, opt := range opts {
+		opt(q)
+	}
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
 	}
 	raw, err := c.doJSON(ctx, http.MethodGet, path, nil)
 	if err != nil {

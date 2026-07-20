@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -518,6 +519,14 @@ func TestLogRoute(t *testing.T) {
 
 	fs := &fakeStreamer{content: "line one\nline two\n"}
 	f = start(t, nil, fs)
+	// The handler now confirms the Proc exists before streaming, so a 404 is
+	// an honest "no such Proc" independent of the streamer.
+	if _, err := f.client.ApplyProc(ctx, &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "web-0"},
+		Spec:     v1alpha1.ProcSpec{Command: []string{"/bin/sleep", "60"}},
+	}); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
 	rc, err := f.client.ProcLogs(ctx, "web-0", client.LogOptions{Follow: true, TailLines: 10, Timestamps: true})
 	if err != nil {
 		t.Fatalf("ProcLogs: %v", err)
@@ -606,6 +615,79 @@ func testTimer(name string) *v1alpha1.Timer {
 				Spec: v1alpha1.ProcTemplateSpec{Command: []string{"/bin/true"}},
 			},
 		},
+	}
+}
+
+// TestListLabelSelector covers the list-only server-side label selector (M9-i):
+// equality, inequality, AND, missing-key semantics, malformed 400, and that
+// watch ignores the selector entirely.
+func TestListLabelSelector(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	apply := func(name string, labels map[string]string) {
+		d := testDaemon(name)
+		d.Metadata.Labels = labels
+		if _, err := f.client.ApplyDaemon(ctx, d); err != nil {
+			t.Fatalf("ApplyDaemon(%s): %v", name, err)
+		}
+	}
+	apply("web-a", map[string]string{"app": "web", "tier": "frontend"})
+	apply("web-b", map[string]string{"app": "web", "tier": "backend"})
+	apply("db", map[string]string{"app": "db"})
+	apply("bare", nil)
+
+	names := func(sel string) []string {
+		ds, _, err := f.client.ListDaemons(ctx, client.WithLabelSelector(sel))
+		if err != nil {
+			t.Fatalf("ListDaemons(%q): %v", sel, err)
+		}
+		out := make([]string, 0, len(ds))
+		for i := range ds {
+			out = append(out, ds[i].Metadata.Name)
+		}
+		slices.Sort(out)
+		return out
+	}
+
+	if got := names("app=web"); !slices.Equal(got, []string{"web-a", "web-b"}) {
+		t.Errorf("app=web → %v", got)
+	}
+	if got := names("app==web"); !slices.Equal(got, []string{"web-a", "web-b"}) {
+		t.Errorf("app==web → %v", got)
+	}
+	if got := names("app!=web"); !slices.Equal(got, []string{"bare", "db"}) {
+		t.Errorf("app!=web → %v (a missing key satisfies !=)", got)
+	}
+	if got := names("app=web,tier=frontend"); !slices.Equal(got, []string{"web-a"}) {
+		t.Errorf("AND app=web,tier=frontend → %v", got)
+	}
+	if got := names("app=missing"); len(got) != 0 {
+		t.Errorf("app=missing → %v, want none", got)
+	}
+	if got := names(""); !slices.Equal(got, []string{"bare", "db", "web-a", "web-b"}) {
+		t.Errorf("empty selector → %v, want all", got)
+	}
+
+	for _, bad := range []string{"app", "=web", "a=b,"} {
+		if _, _, err := f.client.ListDaemons(ctx, client.WithLabelSelector(bad)); !errors.Is(err, v1alpha1.ErrInvalid) {
+			t.Errorf("malformed selector %q: err = %v, want ErrInvalid", bad, err)
+		}
+	}
+
+	// Watch ignores labelSelector: a malformed one must not 400 a watch.
+	hc := &http.Client{Transport: unixTransport(f.socket)}
+	wctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(wctx, http.MethodGet,
+		"http://impd/apis/impd.sh/v1alpha1/daemons?watch=true&labelSelector=bad", nil)
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatalf("watch GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("watch with malformed selector = %d, want 200 (watch ignores selector)", resp.StatusCode)
 	}
 }
 

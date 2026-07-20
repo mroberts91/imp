@@ -23,12 +23,15 @@ import (
 
 	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/clock"
+	"github.com/mroberts91/imp/pkg/client"
 )
 
 // ListWatcher is the slice of pkg/client the informer consumes.
-// *client.Client satisfies it.
+// *client.Client satisfies it. ListRaw takes list options (M9-i) but the
+// informer never passes any — it always lists a whole kind and filters
+// client-side; the variadic keeps the signature identical to the client's.
 type ListWatcher interface {
-	ListRaw(ctx context.Context, kind string) (*v1alpha1.ObjectList, error)
+	ListRaw(ctx context.Context, kind string, opts ...client.ListOption) (*v1alpha1.ObjectList, error)
 	Watch(ctx context.Context, kind, sinceRV string) (<-chan v1alpha1.WatchEvent, func(), error)
 }
 

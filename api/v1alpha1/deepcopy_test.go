@@ -53,7 +53,8 @@ func TestDaemonDeepCopy(t *testing.T) {
 	cp.Spec.Template.Spec.Capabilities.Bounding[0] = "mutated"
 	cp.Spec.Template.Spec.Capabilities.Ambient[0] = "mutated"
 	*cp.Spec.Template.Spec.PrivateTmp = false
-	cp.Spec.Template.Spec.Configs[0] = "mutated"
+	cp.Spec.Template.Spec.Configs[0] = ConfigRef{Name: "mutated"}
+	*cp.Spec.Template.Spec.Configs[1].Path = "/mutated" // deep-copied Path pointer
 	cp.Status.Conditions[0].Status = ConditionTrue
 
 	if after := snapshot(t, orig); after != before {
@@ -93,6 +94,8 @@ func TestConfigDeepCopy(t *testing.T) {
 
 	cp.Metadata.Labels["app"] = "mutated"
 	cp.Spec.Data["app.conf"] = "mutated"
+	cp.Spec.BinaryData["cert.der"][0] = 0xff
+	cp.Spec.Modes["app.conf"] = "0777"
 	*cp.Spec.Mode = "0777"
 
 	if after := snapshot(t, orig); after != before {

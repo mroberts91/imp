@@ -35,16 +35,24 @@ func newLogsCmd(newClient func() *client.Client) *cobra.Command {
 				return err
 			}
 			defer rc.Close()
-			_, err = io.Copy(cmd.OutOrStdout(), rc)
+			n, err := io.Copy(cmd.OutOrStdout(), rc)
 			// An interrupt while following is a clean exit, not an error.
 			if ctx.Err() != nil {
 				return nil
 			}
-			return err
+			if err != nil {
+				return err
+			}
+			// A live Proc that has printed nothing yet is not an error; say so
+			// rather than leaving the operator staring at a blank line.
+			if !opts.Follow && n == 0 {
+				fmt.Fprintf(cmd.ErrOrStderr(), "no output captured yet for proc %s\n", procName)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVarP(&opts.Follow, "follow", "f", false, "stream new lines as they are written")
-	cmd.Flags().IntVar(&opts.TailLines, "tail", 0, "show only the last N lines (0 shows everything)")
+	cmd.Flags().IntVar(&opts.TailLines, "tail", 0, "show only the last N log records — a long line may span several (0 shows everything)")
 	cmd.Flags().BoolVar(&opts.Timestamps, "timestamps", false, "prefix each line with its capture time")
 	cmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		if len(args) > 0 {

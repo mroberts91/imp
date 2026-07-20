@@ -101,6 +101,23 @@ func gracePeriod(p *v1alpha1.Proc) int64 {
 	return 30
 }
 
+// livenessProbeGrace / startupProbeGrace return the probe's own
+// terminationGracePeriodSeconds (M9-l), nil when the probe is absent or sets
+// none — in which case the Proc's grace applies to a probe-triggered kill.
+func livenessProbeGrace(p *v1alpha1.Proc) *int64 {
+	if p.Spec.LivenessProbe != nil {
+		return p.Spec.LivenessProbe.TerminationGracePeriodSeconds
+	}
+	return nil
+}
+
+func startupProbeGrace(p *v1alpha1.Proc) *int64 {
+	if p.Spec.StartupProbe != nil {
+		return p.Spec.StartupProbe.TerminationGracePeriodSeconds
+	}
+	return nil
+}
+
 func stopSignalOf(p *v1alpha1.Proc) string {
 	if p.Spec.StopSignal != "" {
 		return p.Spec.StopSignal

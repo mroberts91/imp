@@ -177,16 +177,25 @@ func printConfigTable(w io.Writer, configs []v1alpha1.Config) {
 	for i := range configs {
 		cfg := &configs[i]
 		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
-			cfg.Metadata.Name, len(cfg.Spec.Data), configTotalSize(cfg),
+			cfg.Metadata.Name, configFileCount(cfg), configTotalSize(cfg),
 			age(cfg.Metadata.CreationTimestamp))
 	}
 	tw.Flush()
 }
 
-// configTotalSize is the SIZE column: total bytes of all files in the Config.
+// configFileCount is the FILES column: text + binary files (M9-d).
+func configFileCount(cfg *v1alpha1.Config) int {
+	return len(cfg.Spec.Data) + len(cfg.Spec.BinaryData)
+}
+
+// configTotalSize is the SIZE column: total bytes of all files in the Config,
+// text and binary (M9-d).
 func configTotalSize(cfg *v1alpha1.Config) string {
 	total := 0
 	for _, content := range cfg.Spec.Data {
+		total += len(content)
+	}
+	for _, content := range cfg.Spec.BinaryData {
 		total += len(content)
 	}
 	return formatBytes(uint64(total))

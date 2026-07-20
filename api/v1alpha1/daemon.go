@@ -46,11 +46,17 @@ type UpdateStrategy struct {
 }
 
 // RollingUpdateDaemonStrategy is the StatefulSet-shaped rolling options:
-// replace one ordinal at a time, highest first, waiting for Ready.
-// Partition is the minimum ordinal of the update target sequence
+// replace ordinals highest first, waiting for each replacement to become
+// available. Partition is the minimum ordinal of the update target sequence
 // (ordinals below it are left on the old hash).
 type RollingUpdateDaemonStrategy struct {
 	Partition *int32 `json:"partition,omitempty"`
+	// MaxUnavailable is how many Procs (in [partition, replicas)) may be
+	// unavailable at once during a roll — an absolute count, ≥ 1 (no
+	// percentages on a single host, M9-e). Nil = 1: one ordinal at a time,
+	// byte-for-byte today's behavior. maxSurge is deliberately absent — a
+	// surge replica has no honest IMP_REPLICA_INDEX (D2).
+	MaxUnavailable *int32 `json:"maxUnavailable,omitempty"`
 }
 
 // ProcTemplate is the part of a DaemonSpec that describes the Procs to

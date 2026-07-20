@@ -38,13 +38,16 @@ const (
 	// ReasonConfigMaterializeFailed (M8): execd could not write a referenced
 	// Config's files before spawn.
 	ReasonConfigMaterializeFailed = "ConfigMaterializeFailed"
-	ReasonProbeFailed             = "ProbeFailed"
-	ReasonUnhealthy               = "Unhealthy"
-	ReasonAdopted                 = "Adopted"
-	ReasonOrphanKilled            = "OrphanKilled"
-	ReasonScheduledRun            = "ScheduledRun"
-	ReasonSkippedRun              = "SkippedRun"
-	ReasonMissedRun               = "MissedRun"
+	// ReasonConfigPathConflict (M9-b): a path: ref would overwrite a file imp
+	// did not write. execd refuses and fails the spawn honestly.
+	ReasonConfigPathConflict = "ConfigPathConflict"
+	ReasonProbeFailed        = "ProbeFailed"
+	ReasonUnhealthy          = "Unhealthy"
+	ReasonAdopted            = "Adopted"
+	ReasonOrphanKilled       = "OrphanKilled"
+	ReasonScheduledRun       = "ScheduledRun"
+	ReasonSkippedRun         = "SkippedRun"
+	ReasonMissedRun          = "MissedRun"
 	// ReasonProgressDeadlineExceeded (M6): a Daemon rollout made no progress
 	// for spec.progressDeadlineSeconds.
 	ReasonProgressDeadlineExceeded = "ProgressDeadlineExceeded"

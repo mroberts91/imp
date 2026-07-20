@@ -52,6 +52,7 @@ events`); you never author it.
 | Advanced | [`11-startup-probe.yaml`](11-startup-probe.yaml) | `startupProbe`: protecting slow starters from liveness |
 | Advanced | [`12-sandboxed-daemon.yaml`](12-sandboxed-daemon.yaml) | Sandboxing: `capabilities` (bind port 80 as non-root), `noNewPrivileges`, `privateTmp` |
 | Advanced | [`13-config-daemon.yaml`](13-config-daemon.yaml) | `Config` files + `configs` ref: a config edit rolls the Daemon (`IMP_CONFIG_DIR`, roll-on-change) |
+| Advanced | [`14-details.yaml`](14-details.yaml) | The M9 knobs: config `path:`/`binaryData`/`modes`, `maxUnavailable`, timer `timeZone`/`jitterSeconds`/`catchUp`, probe-level `terminationGracePeriodSeconds` |
 
 Work through one:
 

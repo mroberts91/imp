@@ -3,6 +3,11 @@
 
 package v1alpha1
 
+import (
+	"bytes"
+	"encoding/json"
+)
+
 // Proc is one supervised process instance.
 type Proc struct {
 	TypeMeta `json:",inline"`
@@ -82,13 +87,64 @@ type ProcTemplateSpec struct {
 	// PrivateTmp gives the process its own tmpfs over /tmp and /var/tmp in
 	// a private mount namespace. Needs a privileged impd. Nil = off.
 	PrivateTmp *bool `json:"privateTmp,omitempty"`
-	// Configs names Config objects whose files execd materializes under
-	// IMP_CONFIG_DIR/<configName>/ before spawn (M8). Referenced content joins
-	// the Proc's revision identity: editing a referenced Config rolls the
-	// Daemon (M8-b). Nil-default — never materialized by defaulting, so a
-	// daemon without config refs keeps its pre-M8 template hash and does not
-	// roll on upgrade (hash stability).
-	Configs []string `json:"configs,omitempty"`
+	// Configs references Config objects whose files execd materializes before
+	// spawn (M8). A path-less ref lands under IMP_CONFIG_DIR/<configName>/; a
+	// ref with a path lands its files in that absolute directory (M9-b).
+	// Referenced content joins the Proc's revision identity: editing a
+	// referenced Config rolls the Daemon (M8-b), and so does changing a ref's
+	// path (it changes this field's canonical JSON, hence the template hash).
+	// Nil-default — never materialized by defaulting, so a daemon without
+	// config refs keeps its pre-M8 template hash and does not roll on upgrade.
+	Configs []ConfigRef `json:"configs,omitempty"`
+}
+
+// ConfigRef references a Config from a template. In YAML/JSON it is either a
+// bare string ("web") or an object ({name: web, path: /etc/nginx/conf.d}).
+// MarshalJSON emits the bare string when only Name is set, so the canonical
+// JSON — and thus the template hash — of every pre-M9 manifest is
+// byte-identical (golden 8233565f untouched, the M9-b upgrade guarantee).
+type ConfigRef struct {
+	// Name is the referenced Config's object name (required).
+	Name string `json:"name"`
+	// Path, when set, is the absolute directory the Config's files land in
+	// (M9-b directory semantics). Nil means the per-proc IMP_CONFIG_DIR tree.
+	Path *string `json:"path,omitempty"`
+}
+
+// configRefObject is ConfigRef without the custom marshaling, used to encode
+// and decode the object form without recursing into MarshalJSON/UnmarshalJSON.
+type configRefObject ConfigRef
+
+// MarshalJSON emits the bare-string form when only Name is set (pre-M9 byte
+// compatibility), else the {name, path} object form.
+func (r ConfigRef) MarshalJSON() ([]byte, error) {
+	if r.Path == nil {
+		return json.Marshal(r.Name)
+	}
+	return json.Marshal(configRefObject(r))
+}
+
+// UnmarshalJSON accepts either the bare-string or the {name, path} object form.
+// The object form is decoded strictly (unknown fields rejected) so a typo'd key
+// is a hard error, matching the apiserver's DisallowUnknownFields posture — a
+// custom UnmarshalJSON otherwise silently bypasses it.
+func (r *ConfigRef) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var name string
+		if err := json.Unmarshal(b, &name); err != nil {
+			return err
+		}
+		*r = ConfigRef{Name: name}
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var obj configRefObject
+	if err := dec.Decode(&obj); err != nil {
+		return err
+	}
+	*r = ConfigRef(obj)
+	return nil
 }
 
 // Capabilities is systemd-shaped (CapabilityBoundingSet= /

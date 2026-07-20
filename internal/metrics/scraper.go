@@ -85,5 +85,6 @@ func (s *Scraper) scrape() {
 		}
 		s.reg.SetProcMemory(p.Proc, p.Daemon, st.MemoryCurrent)
 		s.reg.ObserveProcCPU(p.Proc, p.Daemon, float64(st.CPUUsageUsec)/1e6)
+		s.reg.SetProcThrottling(p.Proc, p.Daemon, st.NrThrottled, st.ThrottledUsec)
 	}
 }

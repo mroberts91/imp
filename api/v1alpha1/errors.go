@@ -148,6 +148,10 @@ var (
 	ErrConflict      = errors.New("resourceVersion conflict")
 	ErrCompacted     = errors.New("resourceVersion already compacted")
 	ErrInvalid       = errors.New("invalid object")
+	// ErrConfigPathConflict is returned by config materialization (M9-b) when a
+	// path: ref would overwrite a file imp did not write. Paired with
+	// ReasonConfigPathConflict so execd can label the honest spawn failure.
+	ErrConfigPathConflict = errors.New("config path conflict")
 )
 
 // InvalidError is a validation failure with the accumulated field

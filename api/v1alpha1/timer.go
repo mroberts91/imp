@@ -17,8 +17,23 @@ type Timer struct {
 // TimerSpec is the desired state of a Timer.
 type TimerSpec struct {
 	// Schedule is a standard 5-field cron expression or a descriptor
-	// (@hourly, @daily, @every 10s, ...), evaluated in host-local time.
+	// (@hourly, @daily, @every 10s, ...), evaluated in TimeZone if set, else
+	// host-local time.
 	Schedule string `json:"schedule"`
+	// TimeZone is an IANA zone name (e.g. "America/New_York") the schedule is
+	// evaluated in (M9-f). Nil = host-local time (unchanged). @every schedules
+	// are duration-based and zone-independent.
+	TimeZone *string `json:"timeZone,omitempty"`
+	// JitterSeconds spreads a tick's fire time by a deterministic delay in
+	// [0, jitterSeconds) (M9-g), the systemd RandomizedDelaySec analog. Nil/0 =
+	// no jitter. The delay is derived from (timer UID, tick), so level-triggered
+	// re-evaluation computes the same fire time.
+	JitterSeconds *int32 `json:"jitterSeconds,omitempty"`
+	// CatchUp, when true, fires a run for a tick missed while impd was down
+	// instead of skipping it — the systemd Persistent=true analog (M9-h). Nil/
+	// false = today's skip posture (Persistent=false). A long downtime still
+	// collapses to a single run (mostRecentDue).
+	CatchUp *bool `json:"catchUp,omitempty"`
 	// Suspend pauses scheduling without deleting the Timer. Runs already
 	// started are left alone.
 	Suspend *bool `json:"suspend,omitempty"`

@@ -1,0 +1,92 @@
+# 14 — Sweating the details: the M9 knobs (config paths, maxUnavailable,
+#      timer time zones / jitter / catch-up, probe-level grace).
+#
+#   ConfigMap subPath / absolute mount    ->  configs: [{name, path}]
+#   binaryData / per-key mode             ->  binaryData: / modes:
+#   Deployment maxUnavailable             ->  rollingUpdate.maxUnavailable
+#   CronJob timeZone / startingDeadline   ->  timer timeZone / catchUp
+#   RandomizedDelaySec                    ->  timer jitterSeconds
+#   probe terminationGracePeriodSeconds   ->  same, on livenessProbe/startupProbe
+#
+# None of these are new mechanisms — they are the small, long-requested knobs
+# on machinery that already existed. Every field here is optional; omit them
+# all and you get exactly the pre-M9 behavior.
+
+# ---------------------------------------------------------------------------
+# A Config with a text file, a binary file, and per-file modes.
+#   - binaryData carries raw bytes (base64 in YAML), disjoint from data.
+#   - modes overrides the Config-wide `mode` for a single file.
+apiVersion: impd.sh/v1alpha1
+kind: Config
+metadata:
+  name: nginx
+spec:
+  data:
+    nginx.conf: |
+      worker_processes 4;
+      events {}
+  binaryData:
+    # `openssl rand 16 | base64` — any raw bytes; round-trips exactly.
+    ticket.key: "3q2+7wAAAAABAgMEBQYHCA=="
+  mode: "0644"          # default for every file
+  modes:
+    ticket.key: "0600"  # …but this one is owner-only
+---
+# A daemon that materializes the Config's files into an *absolute* directory
+# (path:), for a service that reads a fixed path and cannot take a config
+# argument. imp refuses to overwrite a file it did not write (a hand-placed
+# /etc/nginx/nginx.conf makes the spawn fail with ConfigPathConflict, one
+# `impctl describe` away), and removes only its own files on teardown.
+#
+# The daemon also shows maxUnavailable: a config or template edit rolls two
+# ordinals at a time instead of one (StatefulSet-shaped, still highest-first,
+# still waiting for each replacement to become available).
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: web
+spec:
+  replicas: 4
+  minReadySeconds: 2
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 2      # roll a pair at once; nil/absent = one at a time
+  template:
+    spec:
+      command: ["sh", "-c", "cat /etc/nginx/nginx.conf; echo; exec sleep 3600"]
+      configs:
+        - name: nginx
+          path: /etc/nginx    # absolute dir; without path: it lands under IMP_CONFIG_DIR
+      livenessProbe:
+        exec:
+          command: ["/bin/true"]
+        periodSeconds: 5
+        # On a liveness failure, kill with THIS grace instead of the Proc's —
+        # a wedged process that ignores SIGTERM is reclaimed fast (M9-l).
+        terminationGracePeriodSeconds: 5
+      readinessProbe:
+        exec:
+          command: ["/bin/true"]
+        periodSeconds: 2
+---
+# A Timer in a named time zone, with jitter and catch-up.
+#   - timeZone: the schedule is evaluated in America/New_York, not the host's
+#     zone. @every schedules are duration-based and ignore it.
+#   - jitterSeconds: each fire is delayed by a deterministic offset in [0, N)
+#     seconds (spread load; the systemd RandomizedDelaySec analog). Identity
+#     (run name, scheduled time) stays the undelayed tick.
+#   - catchUp: a tick missed while impd was down fires once on restart
+#     (systemd Persistent=true) instead of being skipped.
+apiVersion: impd.sh/v1alpha1
+kind: Timer
+metadata:
+  name: nightly-report
+spec:
+  schedule: "0 2 * * *"          # 02:00 …
+  timeZone: America/New_York     # … New York time, not the host's
+  jitterSeconds: 300             # spread the fire across a 5-minute window
+  catchUp: true                  # if impd was down at 02:00, run once on start
+  template:
+    spec:
+      command: ["sh", "-c", "echo generating nightly report"]

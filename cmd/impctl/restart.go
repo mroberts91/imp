@@ -37,9 +37,12 @@ back per the daemon's update strategy, so expect a brief downtime window.
 With --rolling, procs are replaced one ordinal at a time (highest first,
 the RollingUpdate direction), waiting for each replacement to become
 available — Ready, and Ready for minReadySeconds when set — before moving
-on. The per-ordinal wait budget is the daemon's progressDeadlineSeconds.
-With replicas: 1 a rolling restart is still a full-stop restart with a
-wait, since there is no second replica to hold availability.
+on. This is one-at-a-time regardless of the daemon's maxUnavailable —
+an operator restart is conservative by design; the daemon's own rollouts
+honor maxUnavailable. The per-ordinal wait budget is the daemon's
+progressDeadlineSeconds. With replicas: 1 a rolling restart is still a
+full-stop restart with a wait, since there is no second replica to hold
+availability.
 
 Either way the daemon's spec is not modified, so nothing fights the
 manifest directory's ownership of it.`,

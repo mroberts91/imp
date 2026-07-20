@@ -162,7 +162,35 @@ IMP_CONFIG_DIR={data-dir}/configs/{proc}
 
 so a daemon that takes a `-c` argument is configured with
 `command: ["nginx", "-c", "$IMP_CONFIG_DIR/web/nginx.conf"]`. Content is inline
-only — imp never reads or writes outside `--data-dir`.
+only — imp never reads or writes outside `--data-dir` **unless a ref sets an
+explicit `path:`** (below).
+
+**Object-form refs (`path:`, absolute destinations).** A ref may be an object
+`{name, path}` instead of a bare name; its files then land in that absolute
+directory — for a service that reads a fixed location it cannot be told to
+change:
+
+```yaml
+configs:
+  - name: nginx
+    path: /etc/nginx        # files land here, not under IMP_CONFIG_DIR
+```
+
+Safety rails: the directory is created `0755` only if absent (an existing
+admin-managed dir is left untouched); imp **refuses to overwrite a file it did
+not write** — a hand-placed `/etc/nginx/nginx.conf` makes the spawn fail with a
+`ConfigPathConflict` event (one `impctl describe daemon` away), it is never
+clobbered; deleting the Daemon removes only the files imp wrote, never their
+directory. imp tracks each proc's written paths under
+`{data-dir}/configs/.paths/`. Changing a ref's `path:` rolls the Daemon (it
+changes the template).
+
+**Binary content and per-file modes.** `spec.binaryData` carries raw bytes
+(base64 in YAML), with keys disjoint from `data`; `spec.modes` overrides the
+Config-wide `spec.mode` for a single file (resolution: `modes[f]` → `mode` →
+`0644`). Binary and text files share the 1 MiB / 64-file caps. `impctl describe
+config NAME` lists every file with its resolved mode and text/binary type
+(content itself is shown only by `get config -o yaml`).
 
 **Roll-on-change is the point.** Referenced config content joins the Proc's
 revision identity: editing a Config's `data` and re-applying rolls the Daemon

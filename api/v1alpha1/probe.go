@@ -5,7 +5,7 @@ package v1alpha1
 
 // Probe describes a periodic health check against a running Proc.
 // Field vocabulary mirrors staging/src/k8s.io/api/core/v1/types.go Probe
-// (minus gRPC and probe-level terminationGracePeriodSeconds).
+// (minus gRPC).
 type Probe struct {
 	Exec      *ExecAction      `json:"exec,omitempty"`
 	HTTPGet   *HTTPGetAction   `json:"httpGet,omitempty"`
@@ -25,6 +25,12 @@ type Probe struct {
 	// FailureThreshold is the minimum consecutive failures for the probe to
 	// be considered failed after having succeeded. Defaults to 3.
 	FailureThreshold int32 `json:"failureThreshold,omitempty"`
+	// TerminationGracePeriodSeconds is the grace period for the kill triggered
+	// by this probe failing, overriding the Proc's grace for probe-failure
+	// kills only (M9-l). Liveness/startup probes only — rejected on readiness
+	// (k8s parity), since a failing readiness probe never kills. ≥ 1. Nil =
+	// use the Proc's terminationGracePeriodSeconds.
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 }
 
 // ExecAction runs a command in the Proc's cgroup (exit 0 = success).

@@ -198,6 +198,13 @@ tasks:
       - bash scripts/m8-acceptance.sh
     platforms: [linux]
 
+  accept:m9:
+    desc: Rootless M9 acceptance (log pump, config path/modes/binary + conflict, maxUnavailable, timer timeZone/jitter/catchUp, selectors, top)
+    deps: [build]
+    cmds:
+      - bash scripts/m9-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

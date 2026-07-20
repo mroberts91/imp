@@ -258,8 +258,11 @@ func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
 	// one `impctl logs`/`describe` away (M6-h spirit without the shim).
 	if err := w.m.configs.Materialize(ctx, p); err != nil {
 		reason := v1alpha1.ReasonConfigMaterializeFailed
-		if errors.Is(err, v1alpha1.ErrNotFound) {
+		switch {
+		case errors.Is(err, v1alpha1.ErrNotFound):
 			reason = v1alpha1.ReasonConfigMissing
+		case errors.Is(err, v1alpha1.ErrConfigPathConflict):
+			reason = v1alpha1.ReasonConfigPathConflict
 		}
 		w.emit(ctx, p, v1alpha1.EventTypeWarning, reason, fmt.Sprintf("Config materialization failed: %v", err))
 		return fmt.Errorf("materializing configs: %w", err)
@@ -317,7 +320,14 @@ func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
 
 func (w *worker) doStop(ctx context.Context, p *v1alpha1.Proc) {
 	w.stopProbes()
+	// Read the probe-kill latch before clearing it: a stop triggered by a
+	// liveness/startup probe failure uses that probe's grace when it set one
+	// (M9-l). Deletion/rollout stops leave LivenessFailed false and are
+	// unaffected.
+	probeKill := w.rt.LivenessFailed
+	probeGrace := w.rt.ProbeKillGrace
 	w.rt.LivenessFailed = false
+	w.rt.ProbeKillGrace = nil
 	w.clearCgroupSnap()
 	cgPath := w.rt.CgroupPath
 	if !w.rt.Running {
@@ -329,6 +339,9 @@ func (w *worker) doStop(ctx context.Context, p *v1alpha1.Proc) {
 	if p != nil {
 		sig = stopSignalOf(p)
 		grace = gracePeriod(p)
+		if probeKill && probeGrace != nil {
+			grace = *probeGrace
+		}
 		w.emit(ctx, p, v1alpha1.EventTypeNormal, v1alpha1.ReasonKilling,
 			fmt.Sprintf("Stopping proc %s", p.Metadata.Name))
 	}
@@ -408,6 +421,7 @@ func (w *worker) onExit(res exitResult) {
 	noteExit(&w.rt, info, healthy)
 	w.rt.Adopted = false
 	w.rt.LivenessFailed = false
+	w.rt.ProbeKillGrace = nil
 	w.rt.HasReadinessProbe = false
 	w.rt.ReadinessOK = false
 	w.rt.ReadinessFailed = false
@@ -434,6 +448,7 @@ func (w *worker) startProbes(p *v1alpha1.Proc) {
 	w.rt.ReadinessOK = false
 	w.rt.ReadinessFailed = false
 	w.rt.LivenessFailed = false
+	w.rt.ProbeKillGrace = nil
 	w.rt.HasStartupProbe = p.Spec.StartupProbe != nil
 	w.rt.StartupDone = false
 	if p.Spec.StartupProbe == nil && p.Spec.LivenessProbe == nil && p.Spec.ReadinessProbe == nil {
@@ -486,6 +501,7 @@ func (w *worker) applyProbe(ev probes.ResultEvent) {
 			// up — restart it through the liveness latch.
 			w.rt.LivenessFailed = true
 			if p != nil {
+				w.rt.ProbeKillGrace = startupProbeGrace(p)
 				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonProbeFailed,
 					fmt.Sprintf("Startup probe failed: %s", ev.Message))
 				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonUnhealthy,
@@ -510,6 +526,7 @@ func (w *worker) applyProbe(ev probes.ResultEvent) {
 		if ev.Result == probes.ResultFailure {
 			w.rt.LivenessFailed = true
 			if p != nil {
+				w.rt.ProbeKillGrace = livenessProbeGrace(p)
 				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonProbeFailed,
 					fmt.Sprintf("Liveness probe failed: %s", ev.Message))
 				w.emit(ctx, p, v1alpha1.EventTypeWarning, v1alpha1.ReasonUnhealthy,

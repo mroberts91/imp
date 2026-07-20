@@ -37,6 +37,11 @@ type Stats struct {
 	CPUUsageUsec  uint64
 	// PidsCurrent is best-effort: 0 when the pids controller is absent.
 	PidsCurrent uint64
+	// NrThrottled / ThrottledUsec are cumulative cpu.stat CFS throttling
+	// counters (M9-k), best-effort: 0 when the kernel omits the lines (no
+	// cpu.max set, or an older kernel).
+	NrThrottled   uint64
+	ThrottledUsec uint64
 }
 
 // Manager owns a writable cgroup v2 subtree and creates per-Proc children.
@@ -179,13 +184,20 @@ func (m *Manager) Stats(path string) (Stats, error) {
 	found := false
 	for line := range strings.SplitSeq(string(cpuStat), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[0] == "usage_usec" {
+		if len(fields) != 2 {
+			continue
+		}
+		switch fields[0] {
+		case "usage_usec":
 			st.CPUUsageUsec, err = strconv.ParseUint(fields[1], 10, 64)
 			if err != nil {
 				return st, fmt.Errorf("parse cpu.stat usage_usec: %w", err)
 			}
 			found = true
-			break
+		case "nr_throttled": // best-effort; absent unless cpu.max is set
+			st.NrThrottled, _ = strconv.ParseUint(fields[1], 10, 64)
+		case "throttled_usec":
+			st.ThrottledUsec, _ = strconv.ParseUint(fields[1], 10, 64)
 		}
 	}
 	if !found {

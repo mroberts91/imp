@@ -34,25 +34,31 @@ func HashConfigSpec(spec *ConfigSpec) string {
 	return fmt.Sprintf("%08x", h.Sum32())
 }
 
-// ConfigRef pairs a referenced Config's name with the hash of its resolved
-// spec (HashConfigSpec), in template-reference order.
-type ConfigRef struct {
+// RevisionRef pairs a referenced Config's name with the hash of its resolved
+// spec (HashConfigSpec), in template-reference order. It is a component of the
+// Proc revision hash, distinct from the spec-facing ConfigRef (proc.go) that
+// manifests carry — renamed from ConfigRef in M9 to free that name for the
+// union type (M9-n). Path never participates here: a ref's path changes the
+// template's canonical JSON, so it already rolls the Daemon via the template
+// hash.
+type RevisionRef struct {
 	Name string
 	Hash string
 }
 
 // HashDaemonRevision composes a Daemon's Proc revision from its template hash
 // and the resolved specs of its referenced Configs, in reference order
-// (specs[i] corresponds to names[i]). Callers resolve each Config's spec from
-// wherever they read it — the controller's informer cache or the CLI's API
-// client — so centralizing the composition here keeps those callers from
-// drifting on how the revision is built.
-func HashDaemonRevision(templateHash string, names []string, specs []*ConfigSpec) string {
-	refs := make([]ConfigRef, len(names))
-	for i := range names {
-		refs[i] = ConfigRef{Name: names[i], Hash: HashConfigSpec(specs[i])}
+// (specs[i] corresponds to refs[i]). Only each ref's Name and resolved content
+// hash participate — the path is already folded into templateHash. Callers
+// resolve each Config's spec from wherever they read it — the controller's
+// informer cache or the CLI's API client — so centralizing the composition
+// here keeps those callers from drifting on how the revision is built.
+func HashDaemonRevision(templateHash string, refs []ConfigRef, specs []*ConfigSpec) string {
+	revRefs := make([]RevisionRef, len(refs))
+	for i := range refs {
+		revRefs[i] = RevisionRef{Name: refs[i].Name, Hash: HashConfigSpec(specs[i])}
 	}
-	return HashConfigRevision(templateHash, refs)
+	return HashConfigRevision(templateHash, revRefs)
 }
 
 // HashConfigRevision combines a template hash with resolved config hashes into
@@ -63,7 +69,7 @@ func HashDaemonRevision(templateHash string, names []string, specs []*ConfigSpec
 // identity keeps its exact pre-M8 Proc names and labels, and does not roll on
 // upgrade. (The DaemonController shortcuts the empty case before ever calling
 // this; the guard here keeps the function total and the guarantee explicit.)
-func HashConfigRevision(templateHash string, refs []ConfigRef) string {
+func HashConfigRevision(templateHash string, refs []RevisionRef) string {
 	if len(refs) == 0 {
 		return templateHash
 	}

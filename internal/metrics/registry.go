@@ -26,13 +26,15 @@ const (
 type Registry struct {
 	reg *prometheus.Registry
 
-	procPhase       *prometheus.GaugeVec
-	procRestarts    *prometheus.CounterVec
-	probeResults    *prometheus.CounterVec
-	reconcileDur    *prometheus.HistogramVec
-	reconcileErrors *prometheus.CounterVec
-	procMemory      *prometheus.GaugeVec
-	procCPU         *prometheus.CounterVec
+	procPhase            *prometheus.GaugeVec
+	procRestarts         *prometheus.CounterVec
+	probeResults         *prometheus.CounterVec
+	reconcileDur         *prometheus.HistogramVec
+	reconcileErrors      *prometheus.CounterVec
+	procMemory           *prometheus.GaugeVec
+	procCPU              *prometheus.CounterVec
+	procThrottledPeriods *prometheus.GaugeVec
+	procThrottledUsec    *prometheus.GaugeVec
 
 	mu          sync.Mutex
 	lastPhase   map[string]phaseKey // proc name → last published phase labels
@@ -96,6 +98,21 @@ func New() *Registry {
 		Help:      "Proc cumulative CPU time from cgroup cpu.stat usage_usec.",
 	}, []string{"proc", "daemon"})
 
+	// Gauges, not counters: they mirror the kernel's own monotonic cpu.stat
+	// counters, Set from each scrape (the registry's snapshot-Set pattern
+	// cannot drive a true Prometheus counter's delta accounting, M9-k).
+	r.procThrottledPeriods = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "proc_cpu_throttled_periods",
+		Help:      "Proc cumulative CFS throttled periods from cgroup cpu.stat nr_throttled (kernel-monotonic).",
+	}, []string{"proc", "daemon"})
+
+	r.procThrottledUsec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "proc_cpu_throttled_usec",
+		Help:      "Proc cumulative CFS throttled time from cgroup cpu.stat throttled_usec (kernel-monotonic).",
+	}, []string{"proc", "daemon"})
+
 	r.reg.MustRegister(
 		r.procPhase,
 		r.procRestarts,
@@ -104,6 +121,8 @@ func New() *Registry {
 		r.reconcileErrors,
 		r.procMemory,
 		r.procCPU,
+		r.procThrottledPeriods,
+		r.procThrottledUsec,
 	)
 	return r
 }
@@ -182,6 +201,19 @@ func (r *Registry) SetProcMemory(proc, daemon string, bytes uint64) {
 		daemon = "unknown"
 	}
 	r.procMemory.WithLabelValues(proc, daemon).Set(float64(bytes))
+}
+
+// SetProcThrottling publishes the cumulative CFS throttling counters from a
+// cgroup scrape (M9-k). Gauges tracking kernel-monotonic values.
+func (r *Registry) SetProcThrottling(proc, daemon string, periods, usec uint64) {
+	if r == nil || proc == "" {
+		return
+	}
+	if daemon == "" {
+		daemon = "unknown"
+	}
+	r.procThrottledPeriods.WithLabelValues(proc, daemon).Set(float64(periods))
+	r.procThrottledUsec.WithLabelValues(proc, daemon).Set(float64(usec))
 }
 
 // ObserveProcCPU advances the CPU counter from an absolute cumulative seconds reading.

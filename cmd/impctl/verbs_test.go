@@ -45,6 +45,16 @@ func seedProc(t *testing.T, socket, daemon, name string) {
 	}
 }
 
+// TestTopIntervalRequiresWatch pins the guard: --interval is meaningless
+// without --watch and is rejected (fast, before connecting).
+func TestTopIntervalRequiresWatch(t *testing.T) {
+	socket := startServer(t)
+	out := impctl(t, socket, true, "top", "--interval", "5")
+	if !strings.Contains(out, "--interval applies only with --watch") {
+		t.Errorf("top --interval (no --watch) = %q, want the --interval/--watch error", out)
+	}
+}
+
 func TestRestartDeletesDaemonProcs(t *testing.T) {
 	socket := startServer(t)
 	manifest := writeManifest(t, webManifest)

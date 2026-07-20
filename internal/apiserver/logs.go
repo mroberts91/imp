@@ -15,8 +15,10 @@ import (
 // implemented by internal/execd/logs. The api-server's /log route is a thin
 // HTTP adapter over it.
 type LogStreamer interface {
-	// Tail returns the Proc's log stream per opts. It reports
-	// v1alpha1.ErrNotFound for a Proc with no logs.
+	// Tail returns the Proc's log stream per opts. A Proc that exists but has
+	// produced no output yet yields an empty stream, not an error; ErrNotFound
+	// means no capture was ever set up for the name (the handler confirms Proc
+	// existence separately, so this stays an honest 404 for garbage names).
 	Tail(procName string, opts LogOptions) (io.ReadCloser, error)
 }
 
@@ -51,7 +53,15 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		opts.TailLines = n
 	}
 
-	rc, err := s.logs.Tail(r.PathValue("name"), opts)
+	// Existence is the api-server's to judge: a missing Proc is a 404 (typo
+	// UX), while a live Proc with no output yet must stream empty, not 404.
+	name := r.PathValue("name")
+	if _, err := s.store.Get(v1alpha1.KindProc, name); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	rc, err := s.logs.Tail(name, opts)
 	if err != nil {
 		writeError(w, err)
 		return

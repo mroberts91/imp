@@ -20,6 +20,7 @@ import (
 func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	var output string
 	var watch bool
+	var selector string
 	cmd := &cobra.Command{
 		Use:   "get (daemons|procs|events|timers|configs) [NAME]",
 		Short: "Display one or many objects",
@@ -37,10 +38,19 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 				if output != "" {
 					return fmt.Errorf("cannot use --watch with -o")
 				}
+				if selector != "" {
+					// Watch is unfiltered (M9-i): the changelog stream stays
+					// selector-free. Filtering a running watch would be
+					// client-side only and is out of scope for M9.
+					return fmt.Errorf("the -l/--selector flag applies to list, not --watch")
+				}
 				if len(args) == 2 {
 					return fmt.Errorf("get -w watches a kind, not a single named object")
 				}
 				return watchKind(ctx, c, out, kind)
+			}
+			if selector != "" && len(args) == 2 {
+				return fmt.Errorf("the -l/--selector flag applies to a list, not a single named object")
 			}
 
 			var items []json.RawMessage
@@ -51,7 +61,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 				}
 				items = []json.RawMessage{raw}
 			} else {
-				list, err := c.ListRaw(ctx, kind)
+				list, err := c.ListRaw(ctx, kind, client.WithLabelSelector(selector))
 				if err != nil {
 					return err
 				}
@@ -70,6 +80,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: json or yaml (default is a table)")
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "watch for changes after listing")
+	cmd.Flags().StringVarP(&selector, "selector", "l", "", "filter by label (equality terms: k=v, k==v, k!=v, comma-joined); list only")
 	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemons", "procs", "events", "timers", "configs")
 	return cmd
 }
@@ -164,7 +175,7 @@ func printWatchRow(w io.Writer, kind, eventType string, raw json.RawMessage) err
 			return err
 		}
 		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
-			eventType, cfg.Metadata.Name, len(cfg.Spec.Data),
+			eventType, cfg.Metadata.Name, configFileCount(&cfg),
 			configTotalSize(&cfg), age(cfg.Metadata.CreationTimestamp))
 	}
 	return nil

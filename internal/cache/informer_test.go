@@ -15,6 +15,7 @@ import (
 	"github.com/mroberts91/imp/api/v1alpha1"
 	"github.com/mroberts91/imp/internal/cache"
 	"github.com/mroberts91/imp/internal/clock"
+	"github.com/mroberts91/imp/pkg/client"
 )
 
 // fakeLW is a scripted ListWatcher: tests mutate its object set, inject
@@ -43,7 +44,7 @@ func obj(name, marker string) json.RawMessage {
 	return json.RawMessage(fmt.Sprintf(`{"kind":"Daemon","metadata":{"name":%q},"marker":%q}`, name, marker))
 }
 
-func (f *fakeLW) ListRaw(_ context.Context, _ string) (*v1alpha1.ObjectList, error) {
+func (f *fakeLW) ListRaw(_ context.Context, _ string, _ ...client.ListOption) (*v1alpha1.ObjectList, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lists++

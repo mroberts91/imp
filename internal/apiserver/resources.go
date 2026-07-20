@@ -31,13 +31,23 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("watch") == "true" {
+		// Watch ignores labelSelector: the changelog stream stays selector-free
+		// and informers filter client-side (M9-i).
 		s.handleWatch(w, r, kind)
+		return
+	}
+	terms, err := parseLabelSelector(r.URL.Query().Get("labelSelector"))
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 	items, listRV, err := s.store.List(kind)
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	if len(terms) > 0 {
+		items = filterByLabels(items, terms)
 	}
 	if items == nil {
 		items = []json.RawMessage{}

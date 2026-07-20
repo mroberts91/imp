@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,9 +21,14 @@ import (
 )
 
 // Tail implements apiserver.LogStreamer.
+//
+// A missing proc *directory* means capture was never set up for this name
+// (the dir is created at Open, before spawn) → ErrNotFound. A present dir with
+// no current.log yet means the proc simply hasn't produced output: non-follow
+// returns an empty, immediately-EOF stream; follow waits for the file to
+// appear. "no logs yet" is a stream, not an error (docs/.local/05 §6).
 func (s *Store) Tail(procName string, opts apiserver.LogOptions) (io.ReadCloser, error) {
-	path := s.currentPath(procName)
-	if _, err := os.Stat(path); err != nil {
+	if _, err := os.Stat(s.procDir(procName)); err != nil {
 		if os.IsNotExist(err) {
 			return nil, v1alpha1.ErrNotFound
 		}
@@ -33,7 +39,7 @@ func (s *Store) Tail(procName string, opts apiserver.LogOptions) (io.ReadCloser,
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		defer cancel()
-		err := s.stream(ctx, path, opts, pw)
+		err := s.stream(ctx, procName, opts, pw)
 		_ = pw.CloseWithError(err)
 	}()
 	return &tailCloser{ReadCloser: pr, cancel: cancel}, nil
@@ -49,13 +55,24 @@ func (t *tailCloser) Close() error {
 	return t.ReadCloser.Close()
 }
 
-func (s *Store) stream(ctx context.Context, path string, opts apiserver.LogOptions, w io.Writer) error {
+func (s *Store) stream(ctx context.Context, procName string, opts apiserver.LogOptions, w io.Writer) error {
+	path := s.currentPath(procName)
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return v1alpha1.ErrNotFound
+		if !os.IsNotExist(err) {
+			return err
 		}
-		return err
+		// No capture file yet. Non-follow: empty stream. Follow: wait for it.
+		if !opts.Follow {
+			return nil
+		}
+		f, err = s.waitForCreate(ctx, path)
+		if err != nil {
+			return err
+		}
+		if f == nil { // ctx cancelled before the file appeared
+			return nil
+		}
 	}
 	defer f.Close()
 
@@ -140,6 +157,36 @@ func (s *Store) stream(ctx context.Context, path string, opts apiserver.LogOptio
 	}
 }
 
+// waitForCreate blocks until path can be opened, ctx is done, or a real error
+// occurs. The 500 ms ticker is the guaranteed fallback; the proc-dir fsnotify
+// watch is a best-effort latency win. Returns (nil, nil) on ctx cancellation.
+func (s *Store) waitForCreate(ctx context.Context, path string) (*os.File, error) {
+	var events chan fsnotify.Event
+	if watcher, err := fsnotify.NewWatcher(); err == nil {
+		defer watcher.Close()
+		if watcher.Add(filepath.Dir(path)) == nil {
+			events = watcher.Events
+		}
+	}
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		f, err := os.Open(path)
+		if err == nil {
+			return f, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, nil
+		case <-ticker.C:
+		case <-events: // nil when no watcher: this case never fires, ticker covers it
+		}
+	}
+}
+
 func copyRemaining(f *os.File, w io.Writer, timestamps bool) error {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -150,28 +197,45 @@ func copyRemaining(f *os.File, w io.Writer, timestamps bool) error {
 	return sc.Err()
 }
 
+// writeLogLine renders one stored CRI record. In timestamps mode the raw
+// record is printed verbatim (debug view, one record per line). Otherwise the
+// prefix is stripped and the record's tag decides the line ending: an F (full)
+// record completes a line (trailing newline re-added), a P (partial) record is
+// printed without one so a following P/F record concatenates seamlessly —
+// kubelet's P/F rendering (verified against cri-client logs.go).
 func writeLogLine(w io.Writer, line string, timestamps bool) error {
-	out := line
-	if !timestamps {
-		out = stripCRIPrefix(line)
+	if timestamps {
+		_, err := fmt.Fprintln(w, line)
+		return err
 	}
-	_, err := fmt.Fprintln(w, out)
+	content, partial, ok := stripCRIPrefix(line)
+	if ok && partial {
+		_, err := io.WriteString(w, content)
+		return err
+	}
+	_, err := fmt.Fprintln(w, content)
 	return err
 }
 
-// stripCRIPrefix removes "<ts> <stream> <F|P> " from a CRI line.
-func stripCRIPrefix(line string) string {
+// stripCRIPrefix removes "<ts> <stream> <F|P> " from a CRI line, reporting
+// whether it was a P (partial) record. ok is false for an unrecognizable line,
+// which is then printed as-is (with a newline).
+func stripCRIPrefix(line string) (content string, partial, ok bool) {
 	parts := strings.SplitN(line, " ", 4)
 	if len(parts) < 4 {
-		return line
-	}
-	if parts[2] != "F" && parts[2] != "P" {
-		return line
+		return line, false, false
 	}
 	if parts[1] != "stdout" && parts[1] != "stderr" {
-		return line
+		return line, false, false
 	}
-	return parts[3]
+	switch parts[2] {
+	case "F":
+		return parts[3], false, true
+	case "P":
+		return parts[3], true, true
+	default:
+		return line, false, false
+	}
 }
 
 func readLastLines(f *os.File, n int) ([]string, error) {

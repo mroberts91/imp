@@ -58,15 +58,19 @@ refuse_root() {
 }
 
 # Locate a built binary. Search order:
-#   $IMP_BIN_SRC (if exported) -> ./bin -> ../bin (relative to script) -> PATH
-# Prints the resolved absolute path on stdout.
+#   $IMP_BIN_SRC (if exported) -> <repo>/bin (task build's output) -> PATH
+# Anchored on THIS file's location (bootstrap/lib -> repo root), never the
+# caller's: BASH_SOURCE[1] pointed at whichever frame called us, so going
+# through install_binaries searched bootstrap/bin instead of the repo's bin
+# and a fresh checkout's system install could never find its own build
+# (second finding of the M10 Alpine runbook). Prints the resolved absolute
+# path on stdout.
 find_binary() {
-    local name="$1" here candidate
-    here="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
+    local name="$1" root candidate
+    root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     for candidate in \
         "${IMP_BIN_SRC:-}/$name" \
-        "$here/bin/$name" \
-        "$here/../bin/$name" \
+        "$root/bin/$name" \
         "$(command -v "$name" 2>/dev/null || true)"
     do
         [ -n "$candidate" ] && [ -x "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }

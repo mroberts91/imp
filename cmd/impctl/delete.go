@@ -62,6 +62,6 @@ func newDeleteCmd(newClient func() *client.Client) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringSliceVarP(&files, "filename", "f", nil, "delete the objects named in this manifest file or directory (repeatable)")
-	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemon", "proc", "event", "timer")
+	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemon", "proc", "event", "timer", "config")
 	return cmd
 }

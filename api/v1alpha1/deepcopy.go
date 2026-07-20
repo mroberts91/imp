@@ -146,6 +146,31 @@ func (in *ProcTemplateSpec) DeepCopy() *ProcTemplateSpec {
 	if in.PrivateTmp != nil {
 		out.PrivateTmp = new(*in.PrivateTmp)
 	}
+	out.Configs = slices.Clone(in.Configs)
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *Config) DeepCopy() *Config {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Metadata = *in.Metadata.DeepCopy()
+	out.Spec = *in.Spec.DeepCopy()
+	return &out
+}
+
+// DeepCopy returns a copy sharing no memory with the original.
+func (in *ConfigSpec) DeepCopy() *ConfigSpec {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	out.Data = maps.Clone(in.Data)
+	if in.Mode != nil {
+		out.Mode = new(*in.Mode)
+	}
 	return &out
 }
 

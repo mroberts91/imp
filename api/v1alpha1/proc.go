@@ -82,6 +82,13 @@ type ProcTemplateSpec struct {
 	// PrivateTmp gives the process its own tmpfs over /tmp and /var/tmp in
 	// a private mount namespace. Needs a privileged impd. Nil = off.
 	PrivateTmp *bool `json:"privateTmp,omitempty"`
+	// Configs names Config objects whose files execd materializes under
+	// IMP_CONFIG_DIR/<configName>/ before spawn (M8). Referenced content joins
+	// the Proc's revision identity: editing a referenced Config rolls the
+	// Daemon (M8-b). Nil-default — never materialized by defaulting, so a
+	// daemon without config refs keeps its pre-M8 template hash and does not
+	// roll on upgrade (hash stability).
+	Configs []string `json:"configs,omitempty"`
 }
 
 // Capabilities is systemd-shaped (CapabilityBoundingSet= /

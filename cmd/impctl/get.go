@@ -21,7 +21,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	var output string
 	var watch bool
 	cmd := &cobra.Command{
-		Use:   "get (daemons|procs|events|timers) [NAME]",
+		Use:   "get (daemons|procs|events|timers|configs) [NAME]",
 		Short: "Display one or many objects",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -70,7 +70,7 @@ func newGetCmd(newClient func() *client.Client) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output format: json or yaml (default is a table)")
 	cmd.Flags().BoolVarP(&watch, "watch", "w", false, "watch for changes after listing")
-	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemons", "procs", "events", "timers")
+	cmd.ValidArgsFunction = completeKindThenName(newClient, "daemons", "procs", "events", "timers", "configs")
 	return cmd
 }
 
@@ -158,6 +158,14 @@ func printWatchRow(w io.Writer, kind, eventType string, raw json.RawMessage) err
 			eventType, tm.Metadata.Name, tm.Spec.Schedule,
 			timerActive(&tm), lastRun(&tm),
 			age(tm.Metadata.CreationTimestamp))
+	case v1alpha1.KindConfig:
+		var cfg v1alpha1.Config
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n",
+			eventType, cfg.Metadata.Name, len(cfg.Spec.Data),
+			configTotalSize(&cfg), age(cfg.Metadata.CreationTimestamp))
 	}
 	return nil
 }
@@ -219,6 +227,12 @@ func printTable(w io.Writer, kind string, items []json.RawMessage) error {
 			return err
 		}
 		printTimerTable(w, timers)
+	case v1alpha1.KindConfig:
+		configs, err := decodeItems[v1alpha1.Config](items)
+		if err != nil {
+			return err
+		}
+		printConfigTable(w, configs)
 	}
 	return nil
 }

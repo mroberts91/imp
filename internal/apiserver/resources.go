@@ -15,7 +15,14 @@ import (
 	"github.com/mroberts91/imp/api/v1alpha1"
 )
 
-const maxBodyBytes = 1 << 20
+// maxBodyBytes caps an apply request body. It must comfortably exceed the
+// largest object validation accepts so that validation — not the transport —
+// owns the size limit: a Config may carry up to 1 MiB of file content
+// (api/v1alpha1 maxConfigTotalSize), which JSON string-escaping can roughly
+// double, plus the envelope. A tighter cap here would reject a Config near its
+// documented content limit with an opaque "request body too large" before
+// ValidateConfig ever runs.
+const maxBodyBytes = 4 << 20
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	kind, err := resolveKind(r)
@@ -310,6 +317,30 @@ func (s *Server) prepare(kind, urlName string, data []byte, forStatus bool) ([]b
 			if errs := v1alpha1.ValidateEvent(&obj); len(errs) > 0 {
 				return nil, 0, &v1alpha1.InvalidError{Errs: errs}
 			}
+		}
+		body, err := json.Marshal(&obj)
+		return body, rv, err
+
+	case v1alpha1.KindConfig:
+		// A Config has no status subresource (M8-i): PUT .../status is honestly
+		// a 404 — the endpoint does not exist for this kind, not a failed write.
+		if forStatus {
+			return nil, 0, fmt.Errorf("apiserver: %s has no status subresource: %w", kind, v1alpha1.ErrNotFound)
+		}
+		var obj v1alpha1.Config
+		if err := strictUnmarshal(data, &obj); err != nil {
+			return nil, 0, invalidBody(err)
+		}
+		if err := checkIdentity(&obj.TypeMeta, &obj.Metadata, kind, urlName); err != nil {
+			return nil, 0, err
+		}
+		rv, err := parseRV(obj.Metadata.ResourceVersion)
+		if err != nil {
+			return nil, 0, err
+		}
+		v1alpha1.DefaultConfig(&obj)
+		if errs := v1alpha1.ValidateConfig(&obj); len(errs) > 0 {
+			return nil, 0, &v1alpha1.InvalidError{Errs: errs}
 		}
 		body, err := json.Marshal(&obj)
 		return body, rv, err

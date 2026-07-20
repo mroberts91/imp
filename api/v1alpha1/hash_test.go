@@ -122,6 +122,12 @@ func TestHashProcTemplateSensitivity(t *testing.T) {
 	if HashProcTemplate(withPrivateTmp) == base {
 		t.Error("privateTmp addition did not change hash")
 	}
+
+	withConfigs := templateForHash()
+	withConfigs.Spec.Configs = []string{"app"}
+	if HashProcTemplate(withConfigs) == base {
+		t.Error("configs addition did not change hash")
+	}
 }
 
 // TestHashProcTemplateNilFieldsStable pins that a template leaving every
@@ -135,17 +141,83 @@ func TestHashProcTemplateNilFieldsStable(t *testing.T) {
 	nilFieldsNil := func() bool {
 		return tpl.Spec.StartupProbe == nil && tpl.Spec.Rlimits == nil && tpl.Spec.Nice == nil &&
 			tpl.Spec.OOMScoreAdjust == nil && tpl.Spec.Umask == nil &&
-			tpl.Spec.NoNewPrivileges == nil && tpl.Spec.Capabilities == nil && tpl.Spec.PrivateTmp == nil
+			tpl.Spec.NoNewPrivileges == nil && tpl.Spec.Capabilities == nil && tpl.Spec.PrivateTmp == nil &&
+			tpl.Spec.Configs == nil
 	}
 	if !nilFieldsNil() {
-		t.Fatal("fixture must leave M6/M7 fields nil")
+		t.Fatal("fixture must leave M6/M7/M8 fields nil")
 	}
 	defaultProcTemplateSpec(&tpl.Spec) // defaulting must not materialize them
 	if !nilFieldsNil() {
-		t.Fatal("defaulting materialized an M6/M7 template field — this rolls every pre-existing Daemon on upgrade")
+		t.Fatal("defaulting materialized an M6/M7/M8 template field — this rolls every pre-existing Daemon on upgrade")
 	}
 	const golden = "8233565f"
 	if got := HashProcTemplate(tpl); got != golden {
 		t.Errorf("HashProcTemplate = %q, want %q", got, golden)
+	}
+}
+
+func configForHash() *ConfigSpec {
+	return &ConfigSpec{
+		Data: map[string]string{
+			"app.conf":  "listen 8080\n",
+			"logrotate": "daily\n",
+		},
+		Mode: new("0600"),
+	}
+}
+
+// TestHashConfigSpecGolden pins the content-hash of a fixture Config. Breaking
+// this means the canonical ConfigSpec serialization changed, which rolls every
+// Daemon that references a Config on upgrade — change the golden only
+// deliberately.
+func TestHashConfigSpecGolden(t *testing.T) {
+	const golden = "6f28de52"
+	if got := HashConfigSpec(configForHash()); got != golden {
+		t.Errorf("HashConfigSpec = %q, want %q (ConfigSpec serialization changed?)", got, golden)
+	}
+	// Mode participates in the hash: dropping it must change the result.
+	noMode := configForHash()
+	noMode.Mode = nil
+	if HashConfigSpec(noMode) == HashConfigSpec(configForHash()) {
+		t.Error("mode change did not change config hash")
+	}
+	// Content participates.
+	edited := configForHash()
+	edited.Data["app.conf"] = "listen 9090\n"
+	if HashConfigSpec(edited) == HashConfigSpec(configForHash()) {
+		t.Error("content change did not change config hash")
+	}
+}
+
+// TestHashConfigRevisionGolden pins the combined revision hash and its
+// invariants (M8-g).
+func TestHashConfigRevisionGolden(t *testing.T) {
+	const templateHash = "8233565f"
+	refs := []ConfigRef{{Name: "app", Hash: "1a2b3c4d"}, {Name: "shared", Hash: "5e6f7a8b"}}
+
+	const golden = "90cb9485"
+	if got := HashConfigRevision(templateHash, refs); got != golden {
+		t.Errorf("HashConfigRevision = %q, want %q (revision serialization changed?)", got, golden)
+	}
+
+	// No refs ⇒ the template hash unchanged (the M7 byte-identical guarantee).
+	if got := HashConfigRevision(templateHash, nil); got != templateHash {
+		t.Errorf("HashConfigRevision(_, nil) = %q, want %q", got, templateHash)
+	}
+
+	// Renaming a reference rolls even when content hashes are unchanged.
+	renamed := []ConfigRef{{Name: "app2", Hash: "1a2b3c4d"}, {Name: "shared", Hash: "5e6f7a8b"}}
+	if HashConfigRevision(templateHash, renamed) == golden {
+		t.Error("renaming a config reference did not change the revision")
+	}
+	// A different template hash rolls even with identical refs.
+	if HashConfigRevision("ffffffff", refs) == golden {
+		t.Error("template-hash change did not change the revision")
+	}
+	// Reordering references is a different revision (order is reference order).
+	reordered := []ConfigRef{refs[1], refs[0]}
+	if HashConfigRevision(templateHash, reordered) == golden {
+		t.Error("reordering config references did not change the revision")
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/robfig/cron/v3"
@@ -20,6 +21,10 @@ const (
 	maxNameLength       = 253
 	maxLabelPartLength  = 63
 	dns1123SubdomainFmt = "a lowercase RFC 1123 subdomain: alphanumeric segments separated by '.', '-' allowed inside segments"
+
+	// Config size caps (M8-f): k8s ConfigMap parity.
+	maxConfigFiles     = 64
+	maxConfigTotalSize = 1 << 20 // 1 MiB of total content per Config.
 )
 
 var (
@@ -243,6 +248,77 @@ func ValidateEvent(e *Event) ErrorList {
 	return errs
 }
 
+func ValidateConfig(c *Config) ErrorList {
+	var errs ErrorList
+	errs = append(errs, validateObjectMeta(&c.Metadata, NewPath("metadata"))...)
+
+	dataPath := NewPath("spec").Child("data")
+	switch {
+	case len(c.Spec.Data) == 0:
+		errs = append(errs, requiredErr(dataPath, "at least one file is required"))
+	case len(c.Spec.Data) > maxConfigFiles:
+		errs = append(errs, invalidErr(dataPath, len(c.Spec.Data),
+			fmt.Sprintf("must not contain more than %d files", maxConfigFiles)))
+	}
+	total := 0
+	for name, content := range c.Spec.Data {
+		if msg := configFilenameMsg(name); msg != "" {
+			errs = append(errs, invalidErr(dataPath.Key(name), name, msg))
+		}
+		total += len(content)
+	}
+	if total > maxConfigTotalSize {
+		errs = append(errs, invalidErr(dataPath, total,
+			fmt.Sprintf("total content size must be no more than %d bytes (1 MiB)", maxConfigTotalSize)))
+	}
+	if c.Spec.Mode != nil {
+		if msg := configModeMsg(*c.Spec.Mode); msg != "" {
+			errs = append(errs, invalidErr(NewPath("spec").Child("mode"), *c.Spec.Mode, msg))
+		}
+	}
+	return errs
+}
+
+// configModeMsg validates a Config file mode: 3-4 octal digits naming plain
+// permission bits (000-777). Special bits (setuid/setgid/sticky — a non-zero
+// leading digit) are rejected because they are meaningless for a regular file
+// and would be silently dropped when the mode becomes an os.FileMode at
+// materialization; a mode that grants no owner read is rejected because the
+// process — which owns the file after the chown — could then never read it.
+func configModeMsg(mode string) string {
+	if !umaskRegexp.MatchString(mode) {
+		return `must be 3-4 octal digits, e.g. "0644"`
+	}
+	m, err := strconv.ParseUint(mode, 8, 32)
+	if err != nil { // unreachable after the regex, but do not trust it blindly
+		return "must be a valid octal file mode"
+	}
+	switch {
+	case m > 0o777:
+		return "must not set special bits (setuid/setgid/sticky); only permission bits 000-777 are supported for config files"
+	case m&0o400 == 0:
+		return `must grant owner read (e.g. "0644" or "0600") so the process can read the file`
+	}
+	return ""
+}
+
+// configFilenameMsg returns "" if name is a legal Config filename — a single
+// path component — else the reason it is not. Rejecting '/', "." and ".."
+// keeps materialization inside the per-proc config dir (no path traversal).
+func configFilenameMsg(name string) string {
+	switch {
+	case name == "":
+		return "filename must not be empty"
+	case len(name) > maxNameLength:
+		return fmt.Sprintf("filename must be no more than %d characters", maxNameLength)
+	case name == "." || name == "..":
+		return `filename must not be "." or ".."`
+	case strings.ContainsRune(name, '/'):
+		return "filename must be a single path component (no '/')"
+	}
+	return ""
+}
+
 func validateObjectMeta(m *ObjectMeta, p *Path) ErrorList {
 	var errs ErrorList
 	switch {
@@ -315,6 +391,29 @@ func validateProcTemplateSpec(s *ProcTemplateSpec, p *Path) ErrorList {
 	}
 	if s.Capabilities != nil {
 		errs = append(errs, validateCapabilities(s.Capabilities, p.Child("capabilities"))...)
+	}
+	errs = append(errs, validateConfigRefs(s.Configs, p.Child("configs"))...)
+	return errs
+}
+
+// validateConfigRefs checks each Config reference is a legal object name and
+// that the list has no duplicates. Existence is deliberately NOT checked here:
+// manifest-dir creation order is free, and the runtime missing-config story is
+// M8-h's (the DaemonController holds until the Config appears).
+func validateConfigRefs(refs []string, p *Path) ErrorList {
+	var errs ErrorList
+	seen := map[string]bool{}
+	for i, name := range refs {
+		switch {
+		case name == "":
+			errs = append(errs, requiredErr(p.Index(i), ""))
+		case len(name) > maxNameLength || !dns1123SubdomainRegexp.MatchString(name):
+			errs = append(errs, invalidErr(p.Index(i), name, "must be "+dns1123SubdomainFmt))
+		case seen[name]:
+			errs = append(errs, invalidErr(p.Index(i), name, "duplicate config reference"))
+		default:
+			seen[name] = true
+		}
 	}
 	return errs
 }

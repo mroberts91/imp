@@ -5,6 +5,7 @@ package v1alpha1
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,7 @@ func fullDaemon() *Daemon {
 						Ambient:  []string{"net_bind_service"},
 					},
 					PrivateTmp: new(true),
+					Configs:    []string{"app", "shared"},
 					LivenessProbe: &Probe{
 						Exec:                &ExecAction{Command: []string{"/bin/true"}},
 						InitialDelaySeconds: 2,
@@ -180,6 +182,42 @@ func fullEvent() *Event {
 	}
 }
 
+func fullConfig() *Config {
+	return &Config{
+		TypeMeta: TypeMeta{APIVersion: APIVersion, Kind: KindConfig},
+		Metadata: ObjectMeta{
+			Name:              "app",
+			UID:               "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+			ResourceVersion:   "12",
+			CreationTimestamp: NewTime(time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)),
+			Labels:            map[string]string{"app": "web"},
+		},
+		Spec: ConfigSpec{
+			Data: map[string]string{
+				"app.conf":  "listen 8080\n",
+				"logrotate": "daily\n",
+			},
+			Mode: new("0600"),
+		},
+	}
+}
+
+// TestAllKinds pins that AllKinds reports every registered kind, sorted, and
+// stays in lockstep with IsValidKind — so code that iterates it (the manifest
+// sweep) automatically covers a newly added kind.
+func TestAllKinds(t *testing.T) {
+	got := AllKinds()
+	want := []string{KindConfig, KindDaemon, KindEvent, KindProc, KindTimer} // sorted
+	if !slices.Equal(got, want) {
+		t.Errorf("AllKinds() = %v, want %v", got, want)
+	}
+	for _, k := range got {
+		if !IsValidKind(k) {
+			t.Errorf("AllKinds() reported %q, which IsValidKind rejects", k)
+		}
+	}
+}
+
 func TestJSONRoundTrip(t *testing.T) {
 	cases := []struct {
 		name string
@@ -189,6 +227,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		{"Daemon", fullDaemon(), func() any { return &Daemon{} }},
 		{"Proc", fullProc(), func() any { return &Proc{} }},
 		{"Event", fullEvent(), func() any { return &Event{} }},
+		{"Config", fullConfig(), func() any { return &Config{} }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

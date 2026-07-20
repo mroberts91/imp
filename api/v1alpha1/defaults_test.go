@@ -36,11 +36,27 @@ func TestDefaultDaemon(t *testing.T) {
 	if d.Spec.MinReadySeconds != 0 {
 		t.Errorf("MinReadySeconds = %d, want 0 (no default)", d.Spec.MinReadySeconds)
 	}
-	// M6 template fields must stay nil (hash stability — pre-M6 Daemons
-	// must not roll on upgrade).
+	// M6/M8 template fields must stay nil (hash stability — pre-existing
+	// Daemons must not roll on upgrade).
 	if tpl.StartupProbe != nil || tpl.Rlimits != nil || tpl.Nice != nil ||
-		tpl.OOMScoreAdjust != nil || tpl.Umask != nil {
-		t.Error("defaulting materialized an M6 template field")
+		tpl.OOMScoreAdjust != nil || tpl.Umask != nil || tpl.Configs != nil {
+		t.Error("defaulting materialized an M6/M8 template field")
+	}
+}
+
+func TestDefaultConfig(t *testing.T) {
+	// DefaultConfig is a no-op: content and mode are taken verbatim so a
+	// Config's content hash is stable across upgrades (M8-e).
+	c := &Config{
+		Metadata: ObjectMeta{Name: "app"},
+		Spec:     ConfigSpec{Data: map[string]string{"a.conf": "x"}},
+	}
+	DefaultConfig(c)
+	if c.Spec.Mode != nil {
+		t.Errorf("DefaultConfig materialized mode = %q, want nil", *c.Spec.Mode)
+	}
+	if len(c.Spec.Data) != 1 || c.Spec.Data["a.conf"] != "x" {
+		t.Errorf("DefaultConfig altered data: %v", c.Spec.Data)
 	}
 }
 

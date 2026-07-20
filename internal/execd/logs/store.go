@@ -148,6 +148,18 @@ type procWriter struct {
 	wg     sync.WaitGroup
 }
 
+// pump copies one stream (stdout/stderr) into the rotated log as CRI lines.
+//
+// KNOWN BUG (see docs/.local/05-implementation-progress.md §6): the
+// bufio.Scanner (default ScanLines) emits a line lacking a trailing '\n' only
+// at EOF. While the child keeps this stream open, buffered-but-unterminated
+// bytes block inside sc.Scan() and never reach lumberjack — which creates
+// current.log lazily on first write — so a long-lived process whose output
+// does not end in a newline shows NOTHING in `impctl logs` (and, if that is
+// its only output, the file never exists and the log route 404s). Fix
+// direction: read bytes in chunks and emit CRI 'F' on newline / 'P' on an
+// idle-timer or buffer-threshold flush (kubelet kuberuntime/logs shape), so no
+// output is ever withheld pending a newline.
 func (pw *procWriter) pump(r *io.PipeReader, stream string) {
 	defer r.Close()
 	sc := bufio.NewScanner(r)

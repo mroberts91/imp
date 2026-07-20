@@ -30,7 +30,7 @@ const shimExe = "/proc/self/exe"
 // and cgroup membership, so everything downstream (D1 identity, pidfd,
 // probes, log capture) is oblivious to it. cmd.Dir still applies — os/exec
 // chdirs in the forked child before exec, and the shim inherits that.
-func buildCmd(p *v1alpha1.Proc, stdout, stderr io.Writer) (*exec.Cmd, error) {
+func buildCmd(p *v1alpha1.Proc, configDir string, stdout, stderr io.Writer) (*exec.Cmd, error) {
 	if len(p.Spec.Command) == 0 {
 		return nil, fmt.Errorf("proc %s: empty command", p.Metadata.Name)
 	}
@@ -73,12 +73,12 @@ func buildCmd(p *v1alpha1.Proc, stdout, stderr io.Writer) (*exec.Cmd, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Dir = p.Spec.WorkingDir
-	cmd.Env = append(buildEnv(p), entry)
+	cmd.Env = append(buildEnv(p, configDir), entry)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd, nil
 }
 
-func buildEnv(p *v1alpha1.Proc) []string {
+func buildEnv(p *v1alpha1.Proc, configDir string) []string {
 	path := os.Getenv("PATH")
 	if path == "" {
 		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -95,6 +95,11 @@ func buildEnv(p *v1alpha1.Proc) []string {
 		"IMP_PROC=" + p.Metadata.Name,
 		"IMP_DAEMON=" + p.Metadata.Labels[v1alpha1.LabelDaemonName],
 		"IMP_REPLICA_INDEX=" + p.Metadata.Labels[v1alpha1.LabelReplicaIndex],
+	}
+	// IMP_CONFIG_DIR points at the per-proc config directory, injected only
+	// when the Proc references Configs so env stays byte-identical otherwise.
+	if configDir != "" {
+		env = append(env, "IMP_CONFIG_DIR="+configDir)
 	}
 	for _, e := range p.Spec.Env {
 		env = append(env, e.Name+"="+e.Value)

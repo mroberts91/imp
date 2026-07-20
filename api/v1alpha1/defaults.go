@@ -84,6 +84,13 @@ func DefaultTimer(t *Timer) {
 	defaultProcTemplateSpec(&t.Spec.Template.Spec)
 }
 
+// DefaultConfig applies no defaults (M8-e): a Config's content and mode are
+// taken verbatim. Mode resolution happens in execd at materialization, never
+// here, so a Config's content hash stays stable across upgrades that change
+// defaults. Present for symmetry with the other Default* functions and the
+// apiserver's per-kind dispatch.
+func DefaultConfig(c *Config) {}
+
 func defaultProcTemplateSpec(s *ProcTemplateSpec) {
 	if s.RestartPolicy == "" {
 		s.RestartPolicy = RestartPolicyAlways

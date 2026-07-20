@@ -21,6 +21,7 @@ import (
 	"github.com/mroberts91/imp/internal/clock"
 	"github.com/mroberts91/imp/internal/etcl"
 	"github.com/mroberts91/imp/internal/execd/cgroups"
+	"github.com/mroberts91/imp/internal/execd/configfiles"
 	"github.com/mroberts91/imp/internal/execd/logs"
 	"github.com/mroberts91/imp/internal/execd/supervisor"
 	"github.com/mroberts91/imp/pkg/client"
@@ -75,7 +76,8 @@ func startHarnessOpts(t *testing.T, killOnShutdown bool) *harness {
 	inf := cache.NewInformer(cl, v1alpha1.KindProc, func(key string) {
 		mgr.Handle(key)
 	}, nil)
-	mgr = supervisor.NewManager(cl, inf.Store(), logStore, cgMgr, clock.Real{}, nil, killOnShutdown)
+	configStore := configfiles.New(filepath.Join(dir, "configs"), cl)
+	mgr = supervisor.NewManager(cl, inf.Store(), logStore, configStore, cgMgr, clock.Real{}, nil, killOnShutdown)
 	go inf.Run(t.Context())
 	if err := inf.WaitForSync(t.Context()); err != nil {
 		t.Fatalf("WaitForSync: %v", err)
@@ -318,7 +320,7 @@ func TestAdoptAcrossDetach(t *testing.T) {
 	inf2 := cache.NewInformer(h.cl, v1alpha1.KindProc, func(key string) {
 		mgr2.Handle(key)
 	}, nil)
-	mgr2 = supervisor.NewManager(h.cl, inf2.Store(), h.logs, cgMgr, clock.Real{}, nil, true)
+	mgr2 = supervisor.NewManager(h.cl, inf2.Store(), h.logs, nil, cgMgr, clock.Real{}, nil, true)
 	go inf2.Run(ctx)
 	if err := inf2.WaitForSync(ctx); err != nil {
 		t.Fatal(err)
@@ -406,6 +408,51 @@ func TestDeleteStopsProcess(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("proc still present; was pid %d", pid)
+}
+
+// TestConfigMaterializedAndReadable proves the M8 spawn path end to end: a
+// referenced Config's files are materialized under IMP_CONFIG_DIR before the
+// process starts, and the process reads them.
+func TestConfigMaterializedAndReadable(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+
+	if _, err := h.cl.ApplyConfig(ctx, &v1alpha1.Config{
+		Metadata: v1alpha1.ObjectMeta{Name: "app"},
+		Spec:     v1alpha1.ConfigSpec{Data: map[string]string{"greeting": "hello-from-config\n"}},
+	}); err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "cfg-reader-0"},
+		Spec: v1alpha1.ProcSpec{
+			Command:                       []string{"/bin/sh", "-c", `cat "$IMP_CONFIG_DIR/app/greeting"; sleep 30`},
+			Configs:                       []string{"app"},
+			RestartPolicy:                 v1alpha1.RestartPolicyNever,
+			StopSignal:                    "TERM",
+			TerminationGracePeriodSeconds: new(int64(2)),
+		},
+	}
+	if _, err := h.cl.ApplyProc(ctx, p); err != nil {
+		t.Fatalf("ApplyProc: %v", err)
+	}
+	waitPhase(t, h.cl, "cfg-reader-0", v1alpha1.ProcPhaseRunning)
+
+	deadline := time.Now().Add(5 * time.Second)
+	var body []byte
+	for time.Now().Before(deadline) {
+		rc, err := h.cl.ProcLogs(ctx, "cfg-reader-0", client.LogOptions{TailLines: 10})
+		if err == nil {
+			body, _ = io.ReadAll(rc)
+			rc.Close()
+			if strings.Contains(string(body), "hello-from-config") {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("proc did not read its config; logs = %q", body)
 }
 
 func TestLogsCapture(t *testing.T) {

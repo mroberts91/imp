@@ -30,6 +30,7 @@ import (
 	"github.com/mroberts91/imp/internal/etcl"
 	"github.com/mroberts91/imp/internal/execd/cgroups"
 	"github.com/mroberts91/imp/internal/execd/childsetup"
+	"github.com/mroberts91/imp/internal/execd/configfiles"
 	"github.com/mroberts91/imp/internal/execd/logs"
 	"github.com/mroberts91/imp/internal/execd/supervisor"
 	"github.com/mroberts91/imp/internal/manifest"
@@ -99,6 +100,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	// Serve / Run. The supervisor is built before the api-server so it can
 	// be wired in as the StatsProvider behind /stats (impctl top).
 	ctlClient := client.New(socketPath)
+	configStore := configfiles.New(filepath.Join(dataDir, "configs"), ctlClient)
 	clk := clock.Real{}
 	met := metrics.New()
 	manifestRec := recorder.New(ctlClient, "manifest", clk)
@@ -112,7 +114,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	execInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) {
 		execMgr.Handle(key)
 	}, nil)
-	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, cgMgr, clk, execRec, killProcsOnShutdown)
+	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, configStore, cgMgr, clk, execRec, killProcsOnShutdown)
 	execMgr.SetMetrics(met)
 
 	server := apiserver.New(apiserver.Config{
@@ -154,8 +156,13 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	var dcEnqueueOwner func(key string)
 	dcProcInf := cache.NewInformer(ctlClient, v1alpha1.KindProc, func(key string) { dcEnqueueOwner(key) }, nil)
 	dcEnqueueOwner = controllers.EnqueueOwner(dcProcInf.Store(), v1alpha1.KindDaemon, dcQueue)
+	// A Config change enqueues every Daemon that references it (M8): an edit
+	// rolls them, an appearance heals a ConfigMissing hold.
+	dcConfigInf := cache.NewInformer(ctlClient, v1alpha1.KindConfig,
+		daemon.EnqueueReferencingDaemons(dcDaemonInf.Store(), dcQueue), nil)
 	dcRunner := controllers.NewRunner("daemon-controller", dcQueue,
-		daemon.New(ctlClient, dcDaemonInf.Store(), dcProcInf.Store(), clk, daemonRec), 1, dcDaemonInf, dcProcInf)
+		daemon.New(ctlClient, dcDaemonInf.Store(), dcProcInf.Store(), dcConfigInf.Store(), clk, daemonRec),
+		1, dcDaemonInf, dcProcInf, dcConfigInf)
 	dcRunner.SetMetrics(met, metrics.ControllerDaemon)
 
 	// Timer controller: a Timer change enqueues its own key; a Proc change
@@ -193,6 +200,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 
 	go dcDaemonInf.Run(ctx)
 	go dcProcInf.Run(ctx)
+	go dcConfigInf.Run(ctx)
 	go tcTimerInf.Run(ctx)
 	go tcProcInf.Run(ctx)
 	go gcDaemonInf.Run(ctx)

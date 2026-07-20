@@ -170,8 +170,11 @@ func (w *Watcher) scan(ctx context.Context) error {
 	}
 
 	// Sweep phase. delete what this watcher created and the directory no
-	// longer defines.
-	for _, kind := range []string{v1alpha1.KindDaemon, v1alpha1.KindProc, v1alpha1.KindEvent} {
+	// longer defines. Every registered kind is swept (the managed-by-manifest
+	// annotation guard below makes listing controller-owned kinds harmless), so
+	// a new kind is covered automatically — no hardcoded list to forget to
+	// update, which is exactly how Timer silently escaped the sweep before.
+	for _, kind := range v1alpha1.AllKinds() {
 		list, err := w.client.ListRaw(ctx, kind)
 		if err != nil {
 			w.log.Warn("sweep skipped for kind", "kind", kind, "error", err)

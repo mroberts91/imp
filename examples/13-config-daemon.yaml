@@ -1,0 +1,61 @@
+# 13 — Configuration files: carry a daemon's config in the store (M8).
+#
+#   ConfigMap (a set of files)               ->  kind: Config
+#   volumeMount / --config path              ->  configs: [app] + IMP_CONFIG_DIR
+#   `kubectl rollout` after a ConfigMap edit ->  automatic: a config edit rolls
+#
+# A Config is a named set of files (filename -> content). A Daemon references
+# Configs by name; before each spawn, execd writes them under a per-proc
+# directory and injects IMP_CONFIG_DIR pointing at it. The process reads its
+# config by path — most daemons already take a `-c /path/to.conf` argument.
+#
+# The headline: referenced config content joins the Proc's revision identity.
+# Edit this Config's `data` and re-apply, and the Daemon rolls exactly like a
+# template change — through the same strategy machinery (Recreate /
+# RollingUpdate, minReadySeconds, progressDeadlineSeconds, `rollout status`).
+# No checksum-annotation trick, no manual restart. `impctl describe daemon web`
+# shows the referenced Configs and the current revision hash.
+#
+# Honest failure paths:
+#   - a Daemon referencing a Config that does not exist yet HOLDS (creates no
+#     Procs) and reports Progressing=ConfigMissing; it self-heals the moment
+#     the Config appears.
+#   - deleting a Config a running Daemon uses leaves the running process alone
+#     (its files are already on disk); the next respawn fails honestly, one
+#     `impctl logs`/`describe` away, until the Config returns.
+#
+# Notes: content is inline only (imp never reads or writes outside its data
+# dir); files default to mode 0644 — set `mode: "0600"` for a secret-ish file
+# (it is chowned to the daemon's user: so a dropped-privilege process can still
+# read it). Per Config: <= 1 MiB total, <= 64 files. Secrets get their own kind
+# later; a 0600 Config covers the single-host case for now.
+apiVersion: impd.sh/v1alpha1
+kind: Config
+metadata:
+  name: app
+spec:
+  # mode: "0600"   # uncomment to restrict; default is 0644
+  data:
+    app.conf: |
+      greeting = hello from imp
+      workers = 4
+---
+apiVersion: impd.sh/v1alpha1
+kind: Daemon
+metadata:
+  name: web
+spec:
+  replicas: 2
+  minReadySeconds: 2
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    spec:
+      # A stand-in for a real daemon: print the config, then idle. A real
+      # service would be e.g. ["nginx", "-c", "$IMP_CONFIG_DIR/app/app.conf"].
+      command: ["sh", "-c", "cat \"$IMP_CONFIG_DIR/app/app.conf\"; echo; exec sleep 3600"]
+      configs: [app]
+      readinessProbe:
+        exec:
+          command: ["/bin/true"]
+        periodSeconds: 2

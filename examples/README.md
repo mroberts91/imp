@@ -7,10 +7,11 @@ toward it — restarts, replicas, updates, and cleanup included.
 The examples here are a tutorial. Each file is self-contained and commented;
 read them in order.
 
-> **Status:** M1–M7 are complete. Controllers expand Daemons into Procs;
+> **Status:** M1–M8 are complete. Controllers expand Daemons into Procs;
 > execd starts and restarts them; RollingUpdate, Timers, hardening and
-> sandboxing fields, and the `restart [--rolling]`/`run`/`rollout status`
-> verbs all work. Try the “watch it run” commands below.
+> sandboxing fields, `Config` files (roll-on-change), and the
+> `restart [--rolling]`/`run`/`rollout status` verbs all work. Try the
+> “watch it run” commands below.
 
 ## Setup
 
@@ -50,6 +51,7 @@ events`); you never author it.
 | Advanced | [`10-hardened-daemon.yaml`](10-hardened-daemon.yaml) | Unit-file hardening: `rlimits`, `nice`, `oomScoreAdjust`, `umask`, `limits.cpu` |
 | Advanced | [`11-startup-probe.yaml`](11-startup-probe.yaml) | `startupProbe`: protecting slow starters from liveness |
 | Advanced | [`12-sandboxed-daemon.yaml`](12-sandboxed-daemon.yaml) | Sandboxing: `capabilities` (bind port 80 as non-root), `noNewPrivileges`, `privateTmp` |
+| Advanced | [`13-config-daemon.yaml`](13-config-daemon.yaml) | `Config` files + `configs` ref: a config edit rolls the Daemon (`IMP_CONFIG_DIR`, roll-on-change) |
 
 Work through one:
 

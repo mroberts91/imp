@@ -26,6 +26,7 @@ import (
 	"github.com/mroberts91/imp/internal/clock"
 	"github.com/mroberts91/imp/internal/controllers"
 	"github.com/mroberts91/imp/internal/etcl"
+	"github.com/mroberts91/imp/internal/queue"
 	"github.com/mroberts91/imp/pkg/client"
 )
 
@@ -63,6 +64,7 @@ type harness struct {
 	clk     *clock.Fake
 	daemons *cache.Store
 	procs   *cache.Store
+	configs *cache.Store
 }
 
 func startHarness(t *testing.T) *harness {
@@ -72,22 +74,24 @@ func startHarness(t *testing.T) *harness {
 
 	dinf := cache.NewInformer(cl, v1alpha1.KindDaemon, func(string) {}, nil)
 	pinf := cache.NewInformer(cl, v1alpha1.KindProc, func(string) {}, nil)
+	cinf := cache.NewInformer(cl, v1alpha1.KindConfig, func(string) {}, nil)
 	go dinf.Run(ctx)
 	go pinf.Run(ctx)
-	if err := dinf.WaitForSync(ctx); err != nil {
-		t.Fatalf("daemon informer WaitForSync: %v", err)
-	}
-	if err := pinf.WaitForSync(ctx); err != nil {
-		t.Fatalf("proc informer WaitForSync: %v", err)
+	go cinf.Run(ctx)
+	for name, inf := range map[string]*cache.Informer{"daemon": dinf, "proc": pinf, "config": cinf} {
+		if err := inf.WaitForSync(ctx); err != nil {
+			t.Fatalf("%s informer WaitForSync: %v", name, err)
+		}
 	}
 
 	clk := clock.NewFake(time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC))
 	return &harness{
 		cl:      cl,
-		c:       New(cl, dinf.Store(), pinf.Store(), clk, nil),
+		c:       New(cl, dinf.Store(), pinf.Store(), cinf.Store(), clk, nil),
 		clk:     clk,
 		daemons: dinf.Store(),
 		procs:   pinf.Store(),
+		configs: cinf.Store(),
 	}
 }
 
@@ -122,6 +126,13 @@ func (h *harness) serverSnapshot(t *testing.T) map[string]string {
 	for _, p := range ps {
 		snap[v1alpha1.KindProc+"/"+p.Metadata.Name] = p.Metadata.ResourceVersion
 	}
+	cs, _, err := h.cl.ListConfigs(ctx)
+	if err != nil {
+		t.Fatalf("ListConfigs: %v", err)
+	}
+	for _, cfg := range cs {
+		snap[v1alpha1.KindConfig+"/"+cfg.Metadata.Name] = cfg.Metadata.ResourceVersion
+	}
 	return snap
 }
 
@@ -129,7 +140,7 @@ func (h *harness) serverSnapshot(t *testing.T) map[string]string {
 func (h *harness) cacheSnapshot(t *testing.T) map[string]string {
 	t.Helper()
 	snap := map[string]string{}
-	for _, store := range []*cache.Store{h.daemons, h.procs} {
+	for _, store := range []*cache.Store{h.daemons, h.procs, h.configs} {
 		for _, raw := range store.List() {
 			var envelope struct {
 				Kind     string `json:"kind"`
@@ -717,6 +728,208 @@ func TestReconcileRollingUpdatePartition(t *testing.T) {
 	prog := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeProgressing)
 	if prog == nil || prog.Reason != reasonProcsAvailable {
 		t.Fatalf("Progressing = %+v, want complete with partition holding ordinal 0", prog)
+	}
+}
+
+func applyConfig(t *testing.T, h *harness, name string, data map[string]string) *v1alpha1.Config {
+	t.Helper()
+	cfg := &v1alpha1.Config{
+		Metadata: v1alpha1.ObjectMeta{Name: name},
+		Spec:     v1alpha1.ConfigSpec{Data: data},
+	}
+	applied, err := h.cl.ApplyConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("ApplyConfig(%s): %v", name, err)
+	}
+	return applied
+}
+
+func applyNamedDaemonWithConfigs(t *testing.T, h *harness, name string, replicas int32, configs ...string) *v1alpha1.Daemon {
+	t.Helper()
+	d := &v1alpha1.Daemon{
+		Metadata: v1alpha1.ObjectMeta{Name: name},
+		Spec: v1alpha1.DaemonSpec{
+			Replicas: new(replicas),
+			Template: v1alpha1.ProcTemplate{
+				Metadata: v1alpha1.TemplateMeta{Labels: map[string]string{"app": name}},
+				Spec:     v1alpha1.ProcTemplateSpec{Command: []string{"/bin/sleep", "60"}, Configs: configs},
+			},
+		},
+	}
+	applied, err := h.cl.ApplyDaemon(t.Context(), d)
+	if err != nil {
+		t.Fatalf("ApplyDaemon(%s): %v", name, err)
+	}
+	return applied
+}
+
+// wantRevision computes the desired revision the controller would use for the
+// named Daemon and its referenced Configs (same functions the controller runs).
+func wantRevision(t *testing.T, h *harness, daemon string, configs ...string) (templateHash, revision string) {
+	t.Helper()
+	ctx := t.Context()
+	d, err := h.cl.GetDaemon(ctx, daemon)
+	if err != nil {
+		t.Fatalf("GetDaemon(%s): %v", daemon, err)
+	}
+	templateHash = v1alpha1.HashProcTemplate(&d.Spec.Template)
+	refs := make([]v1alpha1.ConfigRef, 0, len(configs))
+	for _, name := range configs {
+		cfg, err := h.cl.GetConfig(ctx, name)
+		if err != nil {
+			t.Fatalf("GetConfig(%s): %v", name, err)
+		}
+		refs = append(refs, v1alpha1.ConfigRef{Name: name, Hash: v1alpha1.HashConfigSpec(&cfg.Spec)})
+	}
+	return templateHash, v1alpha1.HashConfigRevision(templateHash, refs)
+}
+
+// TestReconcileConfigRevisionIdentity pins M8-g: a Daemon referencing a Config
+// gets Procs whose name suffix and config-hash label are the combined
+// revision (≠ the pure template hash), while template-hash keeps its pure
+// meaning.
+func TestReconcileConfigRevisionIdentity(t *testing.T) {
+	h := startHarness(t)
+	applyConfig(t, h, "app", map[string]string{"app.conf": "listen 8080\n"})
+	applyNamedDaemonWithConfigs(t, h, "web", 1, "app")
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	templateHash, revision := wantRevision(t, h, "web", "app")
+	if revision == templateHash {
+		t.Fatal("combined revision equals template hash; config content did not participate")
+	}
+
+	procs := listProcsSorted(t, h)
+	if len(procs) != 1 {
+		t.Fatalf("got %d procs, want 1", len(procs))
+	}
+	p := procs[0]
+	if want := "web-0-" + revision; p.Metadata.Name != want {
+		t.Errorf("proc name = %q, want %q", p.Metadata.Name, want)
+	}
+	if got := p.Metadata.Labels[v1alpha1.LabelConfigHash]; got != revision {
+		t.Errorf("config-hash label = %q, want revision %q", got, revision)
+	}
+	if got := p.Metadata.Labels[v1alpha1.LabelTemplateHash]; got != templateHash {
+		t.Errorf("template-hash label = %q, want pure template hash %q", got, templateHash)
+	}
+}
+
+// TestReconcileNoConfigsHasNoConfigLabel pins the M7 upgrade guarantee: a
+// Daemon without config refs produces Procs with no config-hash label and a
+// name suffix equal to the pure template hash — byte-identical to pre-M8.
+func TestReconcileNoConfigsHasNoConfigLabel(t *testing.T) {
+	h := startHarness(t)
+	applyDaemon(t, h, 1)
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	templateHash, revision := wantRevision(t, h, "web")
+	if revision != templateHash {
+		t.Fatalf("no-config revision %q != template hash %q", revision, templateHash)
+	}
+	procs := listProcsSorted(t, h)
+	if len(procs) != 1 {
+		t.Fatalf("got %d procs, want 1", len(procs))
+	}
+	if _, ok := procs[0].Metadata.Labels[v1alpha1.LabelConfigHash]; ok {
+		t.Errorf("no-config daemon's proc carries a config-hash label: %v", procs[0].Metadata.Labels)
+	}
+	if want := "web-0-" + templateHash; procs[0].Metadata.Name != want {
+		t.Errorf("proc name = %q, want %q", procs[0].Metadata.Name, want)
+	}
+}
+
+// TestReconcileConfigChangeRolls pins M8-b: editing a referenced Config's
+// content rolls the Daemon (new Proc identity) and emits ConfigChanged — never
+// TemplateChanged — since the template itself is unchanged.
+func TestReconcileConfigChangeRolls(t *testing.T) {
+	h := startHarness(t)
+	applyConfig(t, h, "app", map[string]string{"app.conf": "listen 8080\n"})
+	applyNamedDaemonWithConfigs(t, h, "web", 1, "app")
+	h.reconcileUntilSteady(t, "Daemon/web")
+	before := listProcsSorted(t, h)
+	if len(before) != 1 {
+		t.Fatalf("want 1 proc, got %d", len(before))
+	}
+	oldName := before[0].Metadata.Name
+
+	applyConfig(t, h, "app", map[string]string{"app.conf": "listen 9090\n"})
+	h.reconcileUntilSteady(t, "Daemon/web")
+
+	after := listProcsSorted(t, h)
+	if len(after) != 1 {
+		t.Fatalf("want 1 proc after roll, got %d: %v", len(after), procNames(after))
+	}
+	if after[0].Metadata.Name == oldName {
+		t.Fatalf("proc did not roll on config change: still %s", oldName)
+	}
+	_, revision := wantRevision(t, h, "web", "app")
+	if want := "web-0-" + revision; after[0].Metadata.Name != want {
+		t.Errorf("rolled proc name = %q, want %q", after[0].Metadata.Name, want)
+	}
+	waitFor(t, "ConfigChanged event", func() bool { return findEvent(t, h, v1alpha1.ReasonConfigChanged) != nil })
+	if findEvent(t, h, v1alpha1.ReasonTemplateChanged) != nil {
+		t.Error("config-only change emitted a TemplateChanged event")
+	}
+}
+
+// TestReconcileMissingConfigHolds pins M8-h: a Daemon referencing an absent
+// Config creates no Procs, emits a ConfigMissing Warning, and reports
+// Progressing/ConfigMissing — then self-heals when the Config appears.
+func TestReconcileMissingConfigHolds(t *testing.T) {
+	h := startHarness(t)
+	ctx := t.Context()
+	applyNamedDaemonWithConfigs(t, h, "web", 2, "app") // "app" does not exist
+	h.waitCaughtUp(t)
+
+	if err := ignoreRequeue(h.c.Reconcile(ctx, "Daemon/web")); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	h.waitCaughtUp(t)
+	if procs := listProcsSorted(t, h); len(procs) != 0 {
+		t.Fatalf("missing config did not hold: %d procs created (%v)", len(procs), procNames(procs))
+	}
+	waitFor(t, "ConfigMissing event", func() bool { return findEvent(t, h, v1alpha1.ReasonConfigMissing) != nil })
+	if ev := findEvent(t, h, v1alpha1.ReasonConfigMissing); ev.Type != v1alpha1.EventTypeWarning {
+		t.Errorf("ConfigMissing event type = %s, want Warning", ev.Type)
+	}
+	_, prog := getDaemonProgressing(t, h)
+	if prog.Reason != reasonConfigMissing {
+		t.Errorf("Progressing reason = %q, want %q", prog.Reason, reasonConfigMissing)
+	}
+
+	// Self-heal: the Config appears → the hold releases and Procs are created.
+	applyConfig(t, h, "app", map[string]string{"app.conf": "x\n"})
+	h.reconcileUntilSteady(t, "Daemon/web")
+	if procs := listProcsSorted(t, h); len(procs) != 2 {
+		t.Fatalf("after config appeared got %d procs, want 2", len(procs))
+	}
+}
+
+// TestEnqueueReferencingDaemons pins §4.3: a Config event enqueues exactly the
+// Daemons whose template references that Config.
+func TestEnqueueReferencingDaemons(t *testing.T) {
+	h := startHarness(t)
+	applyNamedDaemonWithConfigs(t, h, "web", 1, "app")
+	applyNamedDaemonWithConfigs(t, h, "api", 1, "other")
+	h.waitCaughtUp(t)
+
+	q := queue.NewRateLimiting(queue.DefaultRateLimiter())
+	defer q.ShutDown()
+	enqueue := EnqueueReferencingDaemons(h.daemons, q)
+
+	enqueue("Config/app")
+	if q.Len() != 1 {
+		t.Fatalf("after Config/app, q.Len() = %d, want 1", q.Len())
+	}
+	if key, _ := q.Get(); key != "Daemon/web" {
+		t.Errorf("enqueued %q, want Daemon/web", key)
+	}
+
+	// A Config nobody references enqueues nothing.
+	enqueue("Config/unreferenced")
+	if q.Len() != 0 {
+		t.Errorf("unreferenced Config enqueued %d daemons, want 0", q.Len())
 	}
 }
 

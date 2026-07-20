@@ -68,7 +68,7 @@ func (c *Client) DeleteEvent(ctx context.Context, name string) error {
 }
 
 type object interface {
-	v1alpha1.Daemon | v1alpha1.Proc | v1alpha1.Event | v1alpha1.Timer
+	v1alpha1.Daemon | v1alpha1.Proc | v1alpha1.Event | v1alpha1.Timer | v1alpha1.Config
 }
 
 func get[T object](ctx context.Context, c *Client, kind, name string) (*T, error) {
@@ -139,6 +139,9 @@ func stampTypeMeta[T object](obj *T, kind string) string {
 	case *v1alpha1.Timer:
 		o.APIVersion, o.Kind = v1alpha1.APIVersion, kind
 		return o.Metadata.Name
+	case *v1alpha1.Config:
+		o.APIVersion, o.Kind = v1alpha1.APIVersion, kind
+		return o.Metadata.Name
 	default:
 		panic("unreachable: object constraint covers all kinds")
 	}
@@ -170,4 +173,22 @@ func (c *Client) UpdateTimerStatus(ctx context.Context, t *v1alpha1.Timer) (*v1a
 
 func (c *Client) DeleteTimer(ctx context.Context, name string) error {
 	return c.Delete(ctx, v1alpha1.KindTimer, name)
+}
+
+func (c *Client) GetConfig(ctx context.Context, name string) (*v1alpha1.Config, error) {
+	return get[v1alpha1.Config](ctx, c, v1alpha1.KindConfig, name)
+}
+
+func (c *Client) ListConfigs(ctx context.Context) ([]v1alpha1.Config, string, error) {
+	return list[v1alpha1.Config](ctx, c, v1alpha1.KindConfig)
+}
+
+func (c *Client) ApplyConfig(ctx context.Context, cfg *v1alpha1.Config) (*v1alpha1.Config, error) {
+	return apply(ctx, c, v1alpha1.KindConfig, cfg)
+}
+
+// No UpdateConfigStatus: a Config has no status subresource (M8-i).
+
+func (c *Client) DeleteConfig(ctx context.Context, name string) error {
+	return c.Delete(ctx, v1alpha1.KindConfig, name)
 }

@@ -193,6 +193,54 @@ func TestScanDeletesRemovedManifests(t *testing.T) {
 	}
 }
 
+// TestScanSweepsTimerAndConfig pins that every user-manifestable kind is
+// swept when its manifest is removed — a regression guard: the sweep list once
+// covered only Daemon/Proc/Event, silently leaking manifest-defined Timers and
+// (M8) Configs.
+func TestScanSweepsTimerAndConfig(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+	f.write(t, "cfg.yaml", `apiVersion: impd.sh/v1alpha1
+kind: Config
+metadata:
+  name: app
+spec:
+  data:
+    app.conf: "x"
+`)
+	f.write(t, "timer.yaml", `apiVersion: impd.sh/v1alpha1
+kind: Timer
+metadata:
+  name: nightly
+spec:
+  schedule: "@daily"
+  template:
+    spec:
+      command: ["/bin/true"]
+`)
+	f.scan(t)
+	if _, err := f.client.GetConfig(ctx, "app"); err != nil {
+		t.Fatalf("config not applied: %v", err)
+	}
+	if _, err := f.client.GetTimer(ctx, "nightly"); err != nil {
+		t.Fatalf("timer not applied: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(f.dir, "cfg.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(f.dir, "timer.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	f.scan(t)
+	if _, err := f.client.GetConfig(ctx, "app"); !errors.Is(err, v1alpha1.ErrNotFound) {
+		t.Errorf("config not swept after manifest removal: err = %v", err)
+	}
+	if _, err := f.client.GetTimer(ctx, "nightly"); !errors.Is(err, v1alpha1.ErrNotFound) {
+		t.Errorf("timer not swept after manifest removal: err = %v", err)
+	}
+}
+
 func TestScanCoexistenceRule(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()

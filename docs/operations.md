@@ -147,6 +147,73 @@ Per-Proc logs under `{data-dir}/logs/{proc}/` rotate at
 the hashed template, so editing it rolls the Daemon like any other spec
 change.
 
+## Configuration files
+
+A `Config` is a named set of files — `spec.data` maps each filename to inline
+content. A Daemon (or Timer) template references Configs by name via
+`spec.template.spec.configs: [name, …]`. Before every spawn, execd
+materializes each referenced Config under a per-proc directory and injects
+`IMP_CONFIG_DIR`; the process reads its config by path:
+
+```
+{data-dir}/configs/{proc}/{configName}/{filename}
+IMP_CONFIG_DIR={data-dir}/configs/{proc}
+```
+
+so a daemon that takes a `-c` argument is configured with
+`command: ["nginx", "-c", "$IMP_CONFIG_DIR/web/nginx.conf"]`. Content is inline
+only — imp never reads or writes outside `--data-dir`.
+
+**Roll-on-change is the point.** Referenced config content joins the Proc's
+revision identity: editing a Config's `data` and re-applying rolls the Daemon
+exactly like a template change, through the same strategy machinery (Recreate /
+RollingUpdate, `minReadySeconds`, `progressDeadlineSeconds`, `rollout status`).
+Procs of a config-referencing Daemon carry an `impd.sh/config-hash` label and a
+name suffix that is the combined revision (template hash × resolved config
+content); a config-only change emits a `ConfigChanged` event, a template change
+still emits `TemplateChanged`. Daemons without config refs behave exactly as
+before — same Proc names, no `config-hash` label, no roll on upgrade.
+`impctl describe daemon NAME` shows the referenced `Configs:` and the current
+`Revision:`.
+
+**Honest failure paths.** A Daemon referencing a Config that does not exist
+holds — it creates no Procs, emits a `ConfigMissing` Warning, and reports
+`Progressing=ConfigMissing` — and self-heals the instant the Config appears
+(its watch re-enqueues referencing Daemons). Deleting a Config a running Daemon
+uses leaves the running process untouched (its files are already on disk); the
+controller then holds new creations, and any respawn fails at materialization
+with a `ConfigMissing`/`ConfigMaterializeFailed` event, one `impctl logs` /
+`describe` away, until the Config returns. There is no deletion protection (no
+finalizers — consistent with the M3 decision); the honesty is the safety net.
+Timer runs are the deliberate asymmetry: the TimerController does not resolve
+configs, so a scheduled run against a missing Config fails at spawn (the timer
+already owns failed-run semantics).
+
+**Modes, ownership, and size caps.** Files default to mode `0644`; set
+`spec.mode: "0600"` on the Config for a secret-ish file. `mode` is plain
+permission bits (`000`–`777`, and must grant owner read) — special bits
+(setuid/setgid/sticky) are rejected, since they are meaningless for a regular
+config file. When the Daemon drops
+privilege (`user:`/`group:`), the per-proc config dir and files are chowned to
+that user so it can read even a `0600` file. For a privilege-dropping service,
+the `--data-dir` must be traversable (`o+x`) by that user — the per-proc dir is
+private (`0700`) but the process must reach it; the default system-install data
+dir (`0750 imp:imp`) blocks a service user not in group `imp`, so either widen
+the data dir to `0751` or add the service user to group `imp`. Per Config:
+≤ 1 MiB total content, ≤ 64 files, each filename a single path component. A
+Secret kind (encryption/redaction) is deferred; a `0600` Config covers the
+single-host case for now.
+
+**Content visibility.** `impctl describe config NAME` prints file names, sizes
+and mode — never content, which may be large or sensitive. `impctl get config
+NAME -o yaml` shows everything for those who ask; that asymmetry is deliberate.
+
+**D1 (adopted procs).** Config materialization is a spawn-time setting, like
+rlimits and the sandbox: a Proc re-attached across an impd restart is not
+re-materialized, and keeps the `IMP_CONFIG_DIR` its original spawn set (the
+path is deterministic from the Proc name). The per-proc config dir is removed
+when the Proc object is deleted, not on process exit.
+
 ## Shell completion
 
 `impctl completion bash|zsh|fish` emits the standard cobra script (e.g.

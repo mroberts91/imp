@@ -191,6 +191,13 @@ tasks:
       - bash scripts/m7-acceptance.sh
     platforms: [linux]
 
+  accept:m8:
+    desc: Rootless M8 acceptance (Config materialize/consume, roll-on-change, validation, missing-config hold, delete-in-use honesty)
+    deps: [build]
+    cmds:
+      - bash scripts/m8-acceptance.sh
+    platforms: [linux]
+
   # ---- Quality ----
 
   fmt:

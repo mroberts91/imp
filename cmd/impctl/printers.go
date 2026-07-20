@@ -171,6 +171,27 @@ func lastRun(tm *v1alpha1.Timer) string {
 	return age(tm.Status.LastScheduleTime)
 }
 
+func printConfigTable(w io.Writer, configs []v1alpha1.Config) {
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "NAME\tFILES\tSIZE\tAGE")
+	for i := range configs {
+		cfg := &configs[i]
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%s\n",
+			cfg.Metadata.Name, len(cfg.Spec.Data), configTotalSize(cfg),
+			age(cfg.Metadata.CreationTimestamp))
+	}
+	tw.Flush()
+}
+
+// configTotalSize is the SIZE column: total bytes of all files in the Config.
+func configTotalSize(cfg *v1alpha1.Config) string {
+	total := 0
+	for _, content := range cfg.Spec.Data {
+		total += len(content)
+	}
+	return formatBytes(uint64(total))
+}
+
 // formatBytes renders a byte count in binary units, one decimal.
 func formatBytes(b uint64) string {
 	switch {

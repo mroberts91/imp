@@ -28,13 +28,23 @@ const (
 	ReasonDeleted          = "Deleted"
 	ReasonScalingReplicas  = "ScalingReplicas"
 	ReasonTemplateChanged  = "TemplateChanged"
-	ReasonProbeFailed      = "ProbeFailed"
-	ReasonUnhealthy        = "Unhealthy"
-	ReasonAdopted          = "Adopted"
-	ReasonOrphanKilled     = "OrphanKilled"
-	ReasonScheduledRun     = "ScheduledRun"
-	ReasonSkippedRun       = "SkippedRun"
-	ReasonMissedRun        = "MissedRun"
+	// ReasonConfigChanged (M8): a Daemon rolled because a referenced Config's
+	// content changed (distinct from a template change).
+	ReasonConfigChanged = "ConfigChanged"
+	// ReasonConfigMissing (M8): a referenced Config does not exist. The
+	// DaemonController emits it while holding rollout; execd emits it when a
+	// Config is gone at spawn time.
+	ReasonConfigMissing = "ConfigMissing"
+	// ReasonConfigMaterializeFailed (M8): execd could not write a referenced
+	// Config's files before spawn.
+	ReasonConfigMaterializeFailed = "ConfigMaterializeFailed"
+	ReasonProbeFailed             = "ProbeFailed"
+	ReasonUnhealthy               = "Unhealthy"
+	ReasonAdopted                 = "Adopted"
+	ReasonOrphanKilled            = "OrphanKilled"
+	ReasonScheduledRun            = "ScheduledRun"
+	ReasonSkippedRun              = "SkippedRun"
+	ReasonMissedRun               = "MissedRun"
 	// ReasonProgressDeadlineExceeded (M6): a Daemon rollout made no progress
 	// for spec.progressDeadlineSeconds.
 	ReasonProgressDeadlineExceeded = "ProgressDeadlineExceeded"

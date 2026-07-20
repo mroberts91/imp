@@ -162,3 +162,21 @@ func CheckIdentity(userName, groupName string) error {
 	_, err := resolveIdentity(userName, groupName)
 	return err
 }
+
+// ChownIDs resolves the (uid, gid) that files materialized for a process
+// running as user:/group: must be owned by, so a dropped-privilege process can
+// read them even at a restrictive mode (M8). needsChown is false when neither
+// user nor group is set: the process runs as impd, so impd-owned files are
+// already readable and no chown (which would need privilege) is attempted. A
+// uid or gid of -1 means "leave as impd's" — os.Chown honors -1, so group-only
+// sets the gid and leaves the uid.
+func ChownIDs(userName, groupName string) (uid, gid int, needsChown bool, err error) {
+	if userName == "" && groupName == "" {
+		return -1, -1, false, nil
+	}
+	id, err := resolveIdentity(userName, groupName)
+	if err != nil {
+		return -1, -1, false, err
+	}
+	return id.uid, id.gid, true, nil
+}

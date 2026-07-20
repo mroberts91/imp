@@ -107,7 +107,11 @@ func (w *worker) run() {
 		w.stopProbes()
 		w.stopAdoptWatch()
 		if !w.detach.Load() {
+			// Proc-object deletion (not detach): tear down its logs and its
+			// per-proc config dir. Config files are reproducible from the
+			// store; on detach they are left in place for the adopted proc.
 			_ = w.logs.Remove(w.name)
+			_ = w.m.configs.Remove(w.name)
 		}
 	}()
 
@@ -248,12 +252,29 @@ func (w *worker) doStart(ctx context.Context, p *v1alpha1.Proc) error {
 		return fmt.Errorf("cgroup limits: %w", err)
 	}
 
+	// Materialize referenced Config files before opening logs, so a failure
+	// needs no log/cmd cleanup. A missing Config (or a write failure) is an
+	// honest start failure: a Warning event plus the Waiting status message,
+	// one `impctl logs`/`describe` away (M6-h spirit without the shim).
+	if err := w.m.configs.Materialize(ctx, p); err != nil {
+		reason := v1alpha1.ReasonConfigMaterializeFailed
+		if errors.Is(err, v1alpha1.ErrNotFound) {
+			reason = v1alpha1.ReasonConfigMissing
+		}
+		w.emit(ctx, p, v1alpha1.EventTypeWarning, reason, fmt.Sprintf("Config materialization failed: %v", err))
+		return fmt.Errorf("materializing configs: %w", err)
+	}
+
 	stdout, stderr, err := w.logs.Open(p.Metadata.Name, p.Spec.LogRetention)
 	if err != nil {
 		return err
 	}
 
-	cmd, err := buildCmd(p, stdout, stderr)
+	configDir := ""
+	if len(p.Spec.Configs) > 0 {
+		configDir = w.m.configs.Dir(p.Metadata.Name)
+	}
+	cmd, err := buildCmd(p, configDir, stdout, stderr)
 	if err != nil {
 		w.logs.CloseCapture(p.Metadata.Name)
 		return err

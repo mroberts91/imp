@@ -46,7 +46,7 @@ func TestBuildCmdShimPayload(t *testing.T) {
 			PrivateTmp: new(true),
 		},
 	}
-	cmd, err := buildCmd(p, io.Discard, io.Discard)
+	cmd, err := buildCmd(p, "", io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("buildCmd: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestBuildCmdPathResolution(t *testing.T) {
 		Metadata: v1alpha1.ObjectMeta{Name: "a"},
 		Spec:     v1alpha1.ProcSpec{Command: []string{"sh", "-c", "true"}},
 	}
-	cmd, err := buildCmd(bare, io.Discard, io.Discard)
+	cmd, err := buildCmd(bare, "", io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("buildCmd: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestBuildCmdPathResolution(t *testing.T) {
 		Metadata: v1alpha1.ObjectMeta{Name: "b"},
 		Spec:     v1alpha1.ProcSpec{Command: []string{"./run.sh"}, WorkingDir: "/srv"},
 	}
-	cmd, err = buildCmd(rel, io.Discard, io.Discard)
+	cmd, err = buildCmd(rel, "", io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("buildCmd: %v", err)
 	}
@@ -115,8 +115,32 @@ func TestBuildCmdPathResolution(t *testing.T) {
 		Metadata: v1alpha1.ObjectMeta{Name: "c"},
 		Spec:     v1alpha1.ProcSpec{Command: []string{"no-such-cmd-imp-test"}},
 	}
-	if _, err := buildCmd(missing, io.Discard, io.Discard); err == nil {
+	if _, err := buildCmd(missing, "", io.Discard, io.Discard); err == nil {
 		t.Error("unresolvable bare name: want error")
+	}
+}
+
+// TestBuildEnvConfigDir pins IMP_CONFIG_DIR: injected only when a configDir
+// is given (Procs referencing Configs), absent otherwise so env stays
+// byte-identical for config-less Procs.
+func TestBuildEnvConfigDir(t *testing.T) {
+	p := &v1alpha1.Proc{
+		Metadata: v1alpha1.ObjectMeta{Name: "web-0"},
+		Spec:     v1alpha1.ProcSpec{Command: []string{"/bin/true"}},
+	}
+	hasConfigDir := func(env []string) (string, bool) {
+		for _, e := range env {
+			if v, ok := strings.CutPrefix(e, "IMP_CONFIG_DIR="); ok {
+				return v, true
+			}
+		}
+		return "", false
+	}
+	if _, ok := hasConfigDir(buildEnv(p, "")); ok {
+		t.Error("IMP_CONFIG_DIR set for a config-less proc")
+	}
+	if v, ok := hasConfigDir(buildEnv(p, "/var/lib/imp/configs/web-0")); !ok || v != "/var/lib/imp/configs/web-0" {
+		t.Errorf("IMP_CONFIG_DIR = %q (present=%v), want the given dir", v, ok)
 	}
 }
 
@@ -130,7 +154,7 @@ func TestBuildCmdRejectsUnknownIdentity(t *testing.T) {
 			User:    "no-such-user-imp-test",
 		},
 	}
-	if _, err := buildCmd(p, io.Discard, io.Discard); err == nil {
+	if _, err := buildCmd(p, "", io.Discard, io.Discard); err == nil {
 		t.Error("unknown user: want error from buildCmd")
 	}
 }

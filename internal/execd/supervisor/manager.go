@@ -4,6 +4,7 @@
 package supervisor
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"slices"
@@ -27,6 +28,24 @@ type LogCapture interface {
 	Remove(procName string) error
 }
 
+// ConfigMaterializer is the slice of execd/configfiles the supervisor needs:
+// write a Proc's referenced Config files before spawn, expose the per-proc
+// directory for IMP_CONFIG_DIR, and remove it on teardown (M8).
+type ConfigMaterializer interface {
+	Materialize(ctx context.Context, p *v1alpha1.Proc) error
+	Dir(proc string) string
+	Remove(proc string) error
+}
+
+// noopMaterializer stands in when no ConfigMaterializer is wired (e.g. a test
+// that spawns only config-less Procs). Materialize/Remove are no-ops and Dir
+// is empty, so buildEnv injects no IMP_CONFIG_DIR.
+type noopMaterializer struct{}
+
+func (noopMaterializer) Materialize(context.Context, *v1alpha1.Proc) error { return nil }
+func (noopMaterializer) Dir(string) string                                 { return "" }
+func (noopMaterializer) Remove(string) error                               { return nil }
+
 // Manager routes Proc informer keys to per-Proc workers. Logical fork of
 // pkg/kubelet/pod_workers.go (Copyright The Kubernetes Authors, Apache-2.0;
 // see LICENSES/kubernetes/): all mutations for one Proc happen on one
@@ -35,6 +54,7 @@ type Manager struct {
 	client         *client.Client
 	store          *cache.Store
 	logs           LogCapture
+	configs        ConfigMaterializer
 	cgroups        *cgroups.Manager
 	probes         *probes.Manager
 	clock          clock.Clock
@@ -53,10 +73,11 @@ type Manager struct {
 
 // NewManager builds a Manager. cg is required (cgroup v2 root). A nil clk
 // means the real clock. A nil rec builds a recorder stamped ReportingComponent
-// ("execd"). When killOnShutdown is false (D1 default), Stop leaves children
+// ("execd"). A nil configs means no Config materialization (config-less Procs
+// only). When killOnShutdown is false (D1 default), Stop leaves children
 // running in their cgroups; when true, Stop terminates them (acceptance /
 // full teardown).
-func NewManager(cl *client.Client, store *cache.Store, logs LogCapture, cg *cgroups.Manager, clk clock.Clock, rec *recorder.Recorder, killOnShutdown bool) *Manager {
+func NewManager(cl *client.Client, store *cache.Store, logs LogCapture, configs ConfigMaterializer, cg *cgroups.Manager, clk clock.Clock, rec *recorder.Recorder, killOnShutdown bool) *Manager {
 	if cg == nil {
 		panic("supervisor.NewManager: cgroups Manager is required")
 	}
@@ -66,10 +87,14 @@ func NewManager(cl *client.Client, store *cache.Store, logs LogCapture, cg *cgro
 	if rec == nil {
 		rec = recorder.New(cl, componentName, clk)
 	}
+	if configs == nil {
+		configs = noopMaterializer{}
+	}
 	m := &Manager{
 		client:         cl,
 		store:          store,
 		logs:           logs,
+		configs:        configs,
 		cgroups:        cg,
 		clock:          clk,
 		recorder:       rec,

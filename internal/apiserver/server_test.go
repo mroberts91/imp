@@ -609,6 +609,74 @@ func testTimer(name string) *v1alpha1.Timer {
 	}
 }
 
+func testConfig(name string) *v1alpha1.Config {
+	return &v1alpha1.Config{
+		Metadata: v1alpha1.ObjectMeta{Name: name},
+		Spec:     v1alpha1.ConfigSpec{Data: map[string]string{"app.conf": "listen 8080\n"}},
+	}
+}
+
+func TestConfigLifecycle(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	applied, err := f.client.ApplyConfig(ctx, testConfig("app"))
+	if err != nil {
+		t.Fatalf("ApplyConfig: %v", err)
+	}
+	if applied.APIVersion != v1alpha1.APIVersion || applied.Kind != v1alpha1.KindConfig {
+		t.Errorf("TypeMeta = %+v", applied.TypeMeta)
+	}
+	if applied.Spec.Data["app.conf"] != "listen 8080\n" {
+		t.Errorf("round-trip lost content: %v", applied.Spec.Data)
+	}
+	// No defaulting: mode stays nil so the content hash is upgrade-stable.
+	if applied.Spec.Mode != nil {
+		t.Errorf("apply materialized mode = %q, want nil", *applied.Spec.Mode)
+	}
+
+	// A bad filename is a 422 naming the offending key.
+	bad := testConfig("bad")
+	bad.Spec.Data = map[string]string{"../evil": "x"}
+	if _, err := f.client.ApplyConfig(ctx, bad); !errors.Is(err, v1alpha1.ErrInvalid) {
+		t.Errorf("bad filename apply error = %v, want ErrInvalid", err)
+	}
+
+	// M8-i: a Config has no status subresource — PUT .../status is a 404.
+	body := []byte(`{"apiVersion":"impd.sh/v1alpha1","kind":"Config","metadata":{"name":"app","resourceVersion":"` + applied.Metadata.ResourceVersion + `"}}`)
+	if _, err := f.client.UpdateStatusRaw(ctx, v1alpha1.KindConfig, "app", body); !errors.Is(err, v1alpha1.ErrNotFound) {
+		t.Errorf("status write error = %v, want ErrNotFound (no status subresource)", err)
+	}
+
+	// Only "app" persisted (the invalid apply must not have).
+	configs, _, err := f.client.ListConfigs(ctx)
+	if err != nil || len(configs) != 1 {
+		t.Fatalf("ListConfigs = %d configs, err %v; want 1", len(configs), err)
+	}
+	if err := f.client.DeleteConfig(ctx, "app"); err != nil {
+		t.Fatalf("DeleteConfig: %v", err)
+	}
+}
+
+// TestConfigAtContentCapApplies pins that the request-body cap accommodates a
+// Config at the 1 MiB content limit validation allows. The body (content +
+// envelope) exceeds a 1 MiB cap, so a too-tight maxBodyBytes would reject a
+// valid, documented-size Config with an opaque "request body too large".
+func TestConfigAtContentCapApplies(t *testing.T) {
+	f := start(t, nil, nil)
+	ctx := t.Context()
+
+	big := testConfig("big")
+	big.Spec.Data = map[string]string{"big.conf": strings.Repeat("a", 1<<20)} // exactly the cap
+	applied, err := f.client.ApplyConfig(ctx, big)
+	if err != nil {
+		t.Fatalf("ApplyConfig at content cap: %v", err)
+	}
+	if len(applied.Spec.Data["big.conf"]) != 1<<20 {
+		t.Errorf("round-trip truncated content: got %d bytes", len(applied.Spec.Data["big.conf"]))
+	}
+}
+
 func TestTimerLifecycle(t *testing.T) {
 	f := start(t, nil, nil)
 	ctx := t.Context()

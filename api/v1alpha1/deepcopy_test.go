@@ -53,6 +53,7 @@ func TestDaemonDeepCopy(t *testing.T) {
 	cp.Spec.Template.Spec.Capabilities.Bounding[0] = "mutated"
 	cp.Spec.Template.Spec.Capabilities.Ambient[0] = "mutated"
 	*cp.Spec.Template.Spec.PrivateTmp = false
+	cp.Spec.Template.Spec.Configs[0] = "mutated"
 	cp.Status.Conditions[0].Status = ConditionTrue
 
 	if after := snapshot(t, orig); after != before {
@@ -78,6 +79,34 @@ func TestProcDeepCopy(t *testing.T) {
 
 	if after := snapshot(t, orig); after != before {
 		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)
+	}
+}
+
+func TestConfigDeepCopy(t *testing.T) {
+	orig := fullConfig()
+	before := snapshot(t, orig)
+
+	cp := orig.DeepCopy()
+	if diff := cmp.Diff(orig, cp); diff != "" {
+		t.Fatalf("copy differs from original (-orig +copy):\n%s", diff)
+	}
+
+	cp.Metadata.Labels["app"] = "mutated"
+	cp.Spec.Data["app.conf"] = "mutated"
+	*cp.Spec.Mode = "0777"
+
+	if after := snapshot(t, orig); after != before {
+		t.Errorf("mutating the copy changed the original:\nbefore: %s\nafter:  %s", before, after)
+	}
+
+	// Nil Mode stays nil rather than materializing.
+	minimal := &Config{Metadata: ObjectMeta{Name: "x"}, Spec: ConfigSpec{Data: map[string]string{"a": "b"}}}
+	if minimal.DeepCopy().Spec.Mode != nil {
+		t.Error("nil Mode materialized by DeepCopy")
+	}
+	var nilCfg *Config
+	if nilCfg.DeepCopy() != nil {
+		t.Error("nil Config DeepCopy != nil")
 	}
 }
 

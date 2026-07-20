@@ -29,7 +29,8 @@ func newRolloutStatusCmd(newClient func() *client.Client) *cobra.Command {
 		Use:   "status DAEMON",
 		Short: "Watch a daemon's rollout until it completes or exceeds its progress deadline",
 		Long: `Watch DAEMON's rollout. Exits 0 when every replica is updated and
-available; exits nonzero when Progressing reports ProgressDeadlineExceeded.
+available; exits nonzero when Progressing reports ProgressDeadlineExceeded or a
+referenced Config is missing (apply the Config and re-run).
 
 There is no 'rollout undo' or 'rollout history': the manifest directory
 owns the spec, so the manifest file (and its version control) is the
@@ -136,6 +137,12 @@ func rolloutOutcome(d *v1alpha1.Daemon) (done bool, err error) {
 		return false, nil
 	}
 	if prog.Status == v1alpha1.ConditionFalse && prog.Reason == v1alpha1.ReasonProgressDeadlineExceeded {
+		return true, errors.New(prog.Message)
+	}
+	// A missing referenced Config holds the rollout indefinitely (it cannot
+	// progress until the Config exists), so surface it as a terminal failure
+	// rather than watching forever. It self-heals: apply the Config and re-run.
+	if prog.Reason == v1alpha1.ReasonConfigMissing {
 		return true, errors.New(prog.Message)
 	}
 	avail := v1alpha1.FindStatusCondition(d.Status.Conditions, v1alpha1.ConditionTypeAvailable)

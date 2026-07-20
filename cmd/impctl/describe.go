@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -25,10 +26,10 @@ import (
 
 func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 	return &cobra.Command{
-		Use:               "describe (daemon|proc|timer) NAME",
+		Use:               "describe (daemon|proc|timer|config) NAME",
 		Short:             "Show details of a specific resource, including events",
 		Args:              cobra.ExactArgs(2),
-		ValidArgsFunction: completeKindThenName(newClient, "daemon", "proc", "timer"),
+		ValidArgsFunction: completeKindThenName(newClient, "daemon", "proc", "timer", "config"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, err := resolveKindArg(args[0])
 			if err != nil {
@@ -51,7 +52,7 @@ func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				describeDaemon(out, d, events)
+				describeDaemon(out, d, events, daemonConfigSummary(ctx, c, d))
 			case v1alpha1.KindProc:
 				p, err := c.GetProc(ctx, args[1])
 				if err != nil {
@@ -72,6 +73,16 @@ func newDescribeCmd(newClient func() *client.Client) *cobra.Command {
 					return err
 				}
 				describeTimer(out, tm, events)
+			case v1alpha1.KindConfig:
+				cfg, err := c.GetConfig(ctx, args[1])
+				if err != nil {
+					return err
+				}
+				events, err := eventsRegarding(ctx, c, kind, cfg.Metadata.Name)
+				if err != nil {
+					return err
+				}
+				describeConfig(out, cfg, events)
 			}
 			return nil
 		},
@@ -127,7 +138,40 @@ func eventsForDaemon(ctx context.Context, c *client.Client, d *v1alpha1.Daemon) 
 	return out, nil
 }
 
-func describeDaemon(w io.Writer, d *v1alpha1.Daemon, events []v1alpha1.Event) {
+// configSummary is describe's view of a Daemon's config references and the
+// revision hash its Procs currently carry (M8). revision is the same value the
+// DaemonController computes (template hash × resolved config hashes); it is ""
+// when a referenced Config cannot be resolved, with note giving the reason.
+type configSummary struct {
+	refs     []string
+	revision string
+	note     string
+}
+
+// daemonConfigSummary resolves the Daemon's config references the same way the
+// controller does, so describe reports the revision new Procs will carry. A
+// missing Config yields a note rather than an error — describe still prints.
+func daemonConfigSummary(ctx context.Context, c *client.Client, d *v1alpha1.Daemon) configSummary {
+	refs := d.Spec.Template.Spec.Configs
+	if len(refs) == 0 {
+		return configSummary{}
+	}
+	tmplHash := v1alpha1.HashProcTemplate(&d.Spec.Template)
+	specs := make([]*v1alpha1.ConfigSpec, len(refs))
+	for i, name := range refs {
+		cfg, err := c.GetConfig(ctx, name)
+		if err != nil {
+			if errors.Is(err, v1alpha1.ErrNotFound) {
+				return configSummary{refs: refs, note: fmt.Sprintf("unresolved: config %q not found", name)}
+			}
+			return configSummary{refs: refs, note: fmt.Sprintf("unresolved: %v", err)}
+		}
+		specs[i] = &cfg.Spec
+	}
+	return configSummary{refs: refs, revision: v1alpha1.HashDaemonRevision(tmplHash, refs, specs)}
+}
+
+func describeDaemon(w io.Writer, d *v1alpha1.Daemon, events []v1alpha1.Event, cs configSummary) {
 	fmt.Fprintf(w, "Name:\t%s\n", d.Metadata.Name)
 	fmt.Fprintf(w, "UID:\t%s\n", d.Metadata.UID)
 	fmt.Fprintf(w, "CreationTimestamp:\t%s\n", formatTime(d.Metadata.CreationTimestamp))
@@ -152,6 +196,15 @@ func describeDaemon(w io.Writer, d *v1alpha1.Daemon, events []v1alpha1.Event) {
 	fmt.Fprintf(w, "Command:\t%s\n", strings.Join(d.Spec.Template.Spec.Command, " "))
 	if d.Spec.Template.Spec.RestartPolicy != "" {
 		fmt.Fprintf(w, "RestartPolicy:\t%s\n", d.Spec.Template.Spec.RestartPolicy)
+	}
+	if len(cs.refs) > 0 {
+		fmt.Fprintf(w, "Configs:\t%s\n", strings.Join(cs.refs, ", "))
+		switch {
+		case cs.revision != "":
+			fmt.Fprintf(w, "Revision:\t%s\n", cs.revision)
+		case cs.note != "":
+			fmt.Fprintf(w, "Revision:\t<%s>\n", cs.note)
+		}
 	}
 
 	fmt.Fprintf(w, "\nStatus:\n")
@@ -192,6 +245,38 @@ func describeProc(w io.Writer, p *v1alpha1.Proc, events []v1alpha1.Event) {
 			p.Status.State.Terminated.Message)
 	}
 	printConditions(w, p.Status.Conditions)
+	printEventsTail(w, events)
+}
+
+// describeConfig prints file names, sizes and mode — never content, which may
+// be large or sensitive. `impctl get config NAME -o yaml` shows content for
+// those who ask; that asymmetry is deliberate.
+func describeConfig(w io.Writer, cfg *v1alpha1.Config, events []v1alpha1.Event) {
+	fmt.Fprintf(w, "Name:\t%s\n", cfg.Metadata.Name)
+	fmt.Fprintf(w, "UID:\t%s\n", cfg.Metadata.UID)
+	fmt.Fprintf(w, "CreationTimestamp:\t%s\n", formatTime(cfg.Metadata.CreationTimestamp))
+	printLabels(w, cfg.Metadata.Labels)
+	printAnnotations(w, cfg.Metadata.Annotations)
+
+	mode := "0644 (default)"
+	if cfg.Spec.Mode != nil {
+		mode = *cfg.Spec.Mode
+	}
+	fmt.Fprintf(w, "Mode:\t%s\n", mode)
+
+	fmt.Fprintf(w, "\nFiles:\n")
+	names := make([]string, 0, len(cfg.Spec.Data))
+	for name := range cfg.Spec.Data {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "  NAME\tSIZE")
+	for _, name := range names {
+		fmt.Fprintf(tw, "  %s\t%s\n", name, formatBytes(uint64(len(cfg.Spec.Data[name]))))
+	}
+	tw.Flush()
+
 	printEventsTail(w, events)
 }
 

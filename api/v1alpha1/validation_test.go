@@ -4,6 +4,7 @@
 package v1alpha1
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -476,6 +477,26 @@ func TestValidateDaemon(t *testing.T) {
 			wantFields: []string{"spec.template.spec.capabilities.ambient[0]"},
 		},
 		{
+			name:       "config ref ok",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{"app", "shared"} },
+			wantFields: nil,
+		},
+		{
+			name:       "config ref empty",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{""} },
+			wantFields: []string{"spec.template.spec.configs[0]"},
+		},
+		{
+			name:       "config ref uppercase",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{"App"} },
+			wantFields: []string{"spec.template.spec.configs[0]"},
+		},
+		{
+			name:       "config ref duplicate",
+			mutate:     func(d *Daemon) { d.Spec.Template.Spec.Configs = []string{"app", "app"} },
+			wantFields: []string{"spec.template.spec.configs[1]"},
+		},
+		{
 			name:       "negative minReadySeconds",
 			mutate:     func(d *Daemon) { d.Spec.MinReadySeconds = -1 },
 			wantFields: []string{"spec.minReadySeconds"},
@@ -542,6 +563,117 @@ func TestValidateProc(t *testing.T) {
 	}
 	if errs[0].Field != "metadata.name" || errs[1].Field != "spec.command" {
 		t.Errorf("fields = %q, %q", errs[0].Field, errs[1].Field)
+	}
+}
+
+func validConfig() *Config {
+	return &Config{
+		TypeMeta: TypeMeta{APIVersion: APIVersion, Kind: KindConfig},
+		Metadata: ObjectMeta{Name: "app"},
+		Spec:     ConfigSpec{Data: map[string]string{"app.conf": "listen 8080\n"}},
+	}
+}
+
+func TestValidateConfig(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*Config)
+		wantFields []string
+	}{
+		{name: "valid", mutate: func(*Config) {}},
+		{
+			name:       "missing name",
+			mutate:     func(c *Config) { c.Metadata.Name = "" },
+			wantFields: []string{"metadata.name"},
+		},
+		{
+			name:       "nil data",
+			mutate:     func(c *Config) { c.Spec.Data = nil },
+			wantFields: []string{"spec.data"},
+		},
+		{
+			name:       "empty data map",
+			mutate:     func(c *Config) { c.Spec.Data = map[string]string{} },
+			wantFields: []string{"spec.data"},
+		},
+		{
+			name:       "filename with parent traversal",
+			mutate:     func(c *Config) { c.Spec.Data = map[string]string{"../evil": "x"} },
+			wantFields: []string{"spec.data[../evil]"},
+		},
+		{
+			name:       "filename with slash",
+			mutate:     func(c *Config) { c.Spec.Data = map[string]string{"sub/app.conf": "x"} },
+			wantFields: []string{"spec.data[sub/app.conf]"},
+		},
+		{
+			name:       "filename dot",
+			mutate:     func(c *Config) { c.Spec.Data = map[string]string{".": "x"} },
+			wantFields: []string{"spec.data[.]"},
+		},
+		{
+			name: "too many files",
+			mutate: func(c *Config) {
+				c.Spec.Data = map[string]string{}
+				for i := range maxConfigFiles + 1 {
+					c.Spec.Data[fmt.Sprintf("f%d", i)] = "x"
+				}
+			},
+			wantFields: []string{"spec.data"},
+		},
+		{
+			name: "content too large",
+			mutate: func(c *Config) {
+				c.Spec.Data = map[string]string{"big.conf": strings.Repeat("a", maxConfigTotalSize+1)}
+			},
+			wantFields: []string{"spec.data"},
+		},
+		{
+			name:       "bad mode",
+			mutate:     func(c *Config) { c.Spec.Mode = new("0888") },
+			wantFields: []string{"spec.mode"},
+		},
+		{
+			name:       "mode special bits rejected",
+			mutate:     func(c *Config) { c.Spec.Mode = new("2640") }, // setgid — silently dropped otherwise
+			wantFields: []string{"spec.mode"},
+		},
+		{
+			name:       "mode without owner read rejected",
+			mutate:     func(c *Config) { c.Spec.Mode = new("0044") }, // proc could never read its own config
+			wantFields: []string{"spec.mode"},
+		},
+		{
+			name:       "mode ok",
+			mutate:     func(c *Config) { c.Spec.Mode = new("0600") },
+			wantFields: nil,
+		},
+		{
+			name:       "mode 3-digit ok",
+			mutate:     func(c *Config) { c.Spec.Mode = new("644") },
+			wantFields: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := validConfig()
+			tc.mutate(c)
+			errs := ValidateConfig(c)
+			var gotFields []string
+			for _, e := range errs {
+				gotFields = append(gotFields, e.Field)
+			}
+			if len(gotFields) != len(tc.wantFields) {
+				t.Fatalf("got %d errors %v, want fields %v\nerrors: %v",
+					len(errs), gotFields, tc.wantFields, errs.ToAggregate())
+			}
+			for i, want := range tc.wantFields {
+				if gotFields[i] != want {
+					t.Errorf("error[%d].Field = %q, want %q", i, gotFields[i], want)
+				}
+			}
+		})
 	}
 }
 

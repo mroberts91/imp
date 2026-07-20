@@ -65,6 +65,7 @@ type Controller struct {
 	client   *client.Client
 	daemons  *cache.Store
 	procs    *cache.Store
+	configs  *cache.Store
 	clock    clock.Clock
 	recorder *recorder.Recorder
 	log      *slog.Logger
@@ -72,9 +73,10 @@ type Controller struct {
 
 var _ controllers.Reconciler = (*Controller)(nil)
 
-// New builds a Controller over cl and the two informer stores. A nil clk
-// means the real clock. A nil rec builds a recorder with ReportingComponent.
-func New(cl *client.Client, daemons, procs *cache.Store, clk clock.Clock, rec *recorder.Recorder) *Controller {
+// New builds a Controller over cl and the informer stores (daemons, procs, and
+// — for M8 config resolution — configs). A nil clk means the real clock. A nil
+// rec builds a recorder with ReportingComponent.
+func New(cl *client.Client, daemons, procs, configs *cache.Store, clk clock.Clock, rec *recorder.Recorder) *Controller {
 	if clk == nil {
 		clk = clock.Real{}
 	}
@@ -85,6 +87,7 @@ func New(cl *client.Client, daemons, procs *cache.Store, clk clock.Clock, rec *r
 		client:   cl,
 		daemons:  daemons,
 		procs:    procs,
+		configs:  configs,
 		clock:    clk,
 		recorder: rec,
 		log:      slog.With("component", componentName),
@@ -108,8 +111,18 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 		return fmt.Errorf("decoding %s from cache: %w", key, err)
 	}
 
-	hash := v1alpha1.HashProcTemplate(&d.Spec.Template)
-	current, stale := c.observedProcs(d.Metadata.Name, hash)
+	// Resolve the Proc revision (template hash × referenced Config content,
+	// M8). A missing Config holds the whole pass (M8-h) and self-heals when
+	// the Config appears; a Daemon without config refs behaves exactly as it
+	// did pre-M8 (rev.config == "").
+	rev, missing := c.resolveRevision(&d)
+	if missing != "" {
+		c.emitWarning(ctx, &d, v1alpha1.ReasonConfigMissing,
+			fmt.Sprintf("config %q not found; holding rollout until it exists", missing))
+		return c.holdForMissingConfig(ctx, &d, missing)
+	}
+
+	current, stale := c.observedProcs(d.Metadata.Name, rev)
 	partition := rollingPartition(&d)
 	// Daemons read from the server are always defaulted: Replicas is
 	// non-nil.
@@ -119,7 +132,7 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 	case v1alpha1.UpdateStrategyRollingUpdate:
 		// Fill holes before deleting more stale ordinals (StatefulSet
 		// order: create missing at the update revision, then roll).
-		created, err := c.scaleUp(ctx, &d, current, stale, hash, replicas)
+		created, err := c.scaleUp(ctx, &d, current, stale, rev, replicas)
 		if err != nil {
 			return err
 		}
@@ -132,7 +145,7 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 			// and waits for Ready.
 			return c.rollupStatus(ctx, &d, current, stale, partition)
 		}
-		done, err := c.rollingUpdate(ctx, &d, current, stale, hash, partition)
+		done, err := c.rollingUpdate(ctx, &d, current, stale, rev, partition)
 		if err != nil {
 			return err
 		}
@@ -166,8 +179,8 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 				return err
 			}
 			if deleted > 0 {
-				c.emit(ctx, &d, v1alpha1.ReasonTemplateChanged,
-					fmt.Sprintf("template hash changed to %s, deleted %d stale proc(s)", hash, deleted))
+				c.emit(ctx, &d, rollReason(stale, rev),
+					fmt.Sprintf("rolled to revision %s: deleted %d stale proc(s)", rev.suffix, deleted))
 			}
 			if err := c.rollupStatus(ctx, &d, current, stale, partition); err != nil {
 				return err
@@ -178,7 +191,7 @@ func (c *Controller) Reconcile(ctx context.Context, key string) error {
 
 	switch {
 	case len(current) < replicas:
-		if _, err := c.scaleUp(ctx, &d, current, stale, hash, replicas); err != nil {
+		if _, err := c.scaleUp(ctx, &d, current, stale, rev, replicas); err != nil {
 			return err
 		}
 	case len(current)+len(stale) > replicas:
@@ -208,7 +221,7 @@ func rollingPartition(d *v1alpha1.Daemon) int {
 // slot state is unknown); delete at most one stale Proc per call. done is
 // true when no rolling work remains for this pass (caller may scale). When
 // done is false the status has already been rolled up.
-func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, hash string, partition int) (done bool, err error) {
+func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, rev revision, partition int) (done bool, err error) {
 	replicas := int(*d.Spec.Replicas)
 	byIndex := indexProcs(current, stale)
 	now := c.clock.Now()
@@ -244,8 +257,8 @@ func (c *Controller) rollingUpdate(ctx context.Context, d *v1alpha1.Daemon, curr
 			case err != nil:
 				return false, fmt.Errorf("deleting stale proc %s: %w", name, err)
 			default:
-				c.emit(ctx, d, v1alpha1.ReasonTemplateChanged,
-					fmt.Sprintf("rolling update to hash %s: deleted stale proc %s (ordinal %d)", hash, name, idx))
+				c.emit(ctx, d, rollReason(stale, rev),
+					fmt.Sprintf("rolling update to revision %s: deleted stale proc %s (ordinal %d)", rev.suffix, name, idx))
 			}
 			if err := c.rollupStatus(ctx, d, current, stale, partition); err != nil {
 				return false, err
@@ -285,8 +298,12 @@ func indexProcs(current, stale []v1alpha1.Proc) map[int]procSlot {
 }
 
 // observedProcs scans the proc store for Procs labeled with the daemon's
-// name and partitions them into current-template and stale-template sets.
-func (c *Controller) observedProcs(daemonName, hash string) (current, stale []v1alpha1.Proc) {
+// name and partitions them into current-revision and stale sets. A Proc is
+// current iff BOTH its template-hash and config-hash labels match the desired
+// revision (M8-g); a missing config-hash label reads "", so no-config daemons
+// and pre-M8 Procs compare equal to a "" desired config hash — the upgrade
+// guarantee.
+func (c *Controller) observedProcs(daemonName string, rev revision) (current, stale []v1alpha1.Proc) {
 	for _, raw := range c.procs.List() {
 		var p v1alpha1.Proc
 		if err := json.Unmarshal(raw, &p); err != nil {
@@ -298,7 +315,8 @@ func (c *Controller) observedProcs(daemonName, hash string) (current, stale []v1
 		if p.Metadata.Labels[v1alpha1.LabelDaemonName] != daemonName {
 			continue
 		}
-		if p.Metadata.Labels[v1alpha1.LabelTemplateHash] == hash {
+		if p.Metadata.Labels[v1alpha1.LabelTemplateHash] == rev.template &&
+			p.Metadata.Labels[v1alpha1.LabelConfigHash] == rev.config {
 			current = append(current, p)
 		} else {
 			stale = append(stale, p)
@@ -312,7 +330,7 @@ func (c *Controller) observedProcs(daemonName, hash string) (current, stale []v1
 // still hold a stale Proc are skipped (RollingUpdate delete-then-create).
 // Returns how many Procs were created, so the RollingUpdate path can stop
 // after a creation pass instead of trusting the (still-lagging) cache.
-func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, hash string, replicas int) (int, error) {
+func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, rev revision, replicas int) (int, error) {
 	used := make(map[int]bool, len(current)+len(stale))
 	for i := range current {
 		if idx, ok := c.replicaIndex(&current[i]); ok {
@@ -330,7 +348,7 @@ func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current, s
 		if used[idx] {
 			continue
 		}
-		p := newProc(d, idx, hash)
+		p := newProc(d, idx, rev)
 		if _, err := c.client.ApplyProc(ctx, p); err != nil {
 			// Includes ErrInvalid from a same-name-different-spec
 			// collision: a real error, surfaced for backoff.
@@ -349,9 +367,10 @@ func (c *Controller) scaleUp(ctx context.Context, d *v1alpha1.Daemon, current, s
 	case len(stale) > 0 && len(created) > 0:
 		// Stale Procs present means a roll is in flight: these creations
 		// are rolling replacements, not a scale change.
+		reason := rollReason(stale, rev)
 		for _, name := range created {
-			c.emit(ctx, d, v1alpha1.ReasonTemplateChanged,
-				fmt.Sprintf("rolling update to hash %s: created proc %s", hash, name))
+			c.emit(ctx, d, reason,
+				fmt.Sprintf("rolling update to revision %s: created proc %s", rev.suffix, name))
 		}
 	case len(created) > 0:
 		c.emit(ctx, d, v1alpha1.ReasonScalingReplicas,
@@ -418,19 +437,25 @@ func (c *Controller) replicaIndex(p *v1alpha1.Proc) (int, bool) {
 
 // newProc builds the Proc for one replica index of d: template metadata
 // first, system labels layered on top, an ownerReference back to the
-// Daemon, and a deep copy of the (already defaulted) template spec.
-func newProc(d *v1alpha1.Daemon, idx int, hash string) *v1alpha1.Proc {
+// Daemon, and a deep copy of the (already defaulted) template spec. The name
+// suffix and config-hash label carry the revision (M8-g); the config-hash
+// label is set only when the template references Configs, so no-config
+// Daemons produce byte-identical Procs to pre-M8.
+func newProc(d *v1alpha1.Daemon, idx int, rev revision) *v1alpha1.Proc {
 	labels := maps.Clone(d.Spec.Template.Metadata.Labels)
 	if labels == nil {
 		labels = make(map[string]string, 3)
 	}
 	labels[v1alpha1.LabelDaemonName] = d.Metadata.Name
-	labels[v1alpha1.LabelTemplateHash] = hash
+	labels[v1alpha1.LabelTemplateHash] = rev.template
+	if rev.config != "" {
+		labels[v1alpha1.LabelConfigHash] = rev.config
+	}
 	labels[v1alpha1.LabelReplicaIndex] = strconv.Itoa(idx)
 
 	return &v1alpha1.Proc{
 		Metadata: v1alpha1.ObjectMeta{
-			Name:        fmt.Sprintf("%s-%d-%s", d.Metadata.Name, idx, hash),
+			Name:        fmt.Sprintf("%s-%d-%s", d.Metadata.Name, idx, rev.suffix),
 			Labels:      labels,
 			Annotations: maps.Clone(d.Spec.Template.Metadata.Annotations),
 			OwnerReferences: []v1alpha1.OwnerReference{{
@@ -469,6 +494,27 @@ const (
 // progressDeadlineSeconds behind. Time-driven flips (a proc maturing to
 // available, the deadline firing) get a RequeueAfter, since no watch event
 // announces the passage of time.
+// availableCondition builds the Available condition from the observed
+// available/replica counts. Shared by rollupStatus and the missing-config hold
+// so availability is reported identically on both paths.
+func availableCondition(available, replicas int32, gen int64, now v1alpha1.Time) v1alpha1.Condition {
+	c := v1alpha1.Condition{
+		Type:               v1alpha1.ConditionTypeAvailable,
+		Status:             v1alpha1.ConditionFalse,
+		Reason:             reasonMinReplicasUnavailable,
+		Message:            fmt.Sprintf("waiting for procs to become available (%d/%d)", available, replicas),
+		ObservedGeneration: gen,
+		LastTransitionTime: now,
+		LastUpdateTime:     now,
+	}
+	if available >= replicas {
+		c.Status = v1alpha1.ConditionTrue
+		c.Reason = reasonMinReplicasAvailable
+		c.Message = "minimum number of replicas is available"
+	}
+	return c
+}
+
 func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, current, stale []v1alpha1.Proc, partition int) error {
 	name := d.Metadata.Name
 	gen := d.Metadata.Generation
@@ -495,20 +541,7 @@ func (c *Controller) rollupStatus(ctx context.Context, d *v1alpha1.Daemon, curre
 	}
 
 	now := v1alpha1.NewTime(nowT)
-	avail := v1alpha1.Condition{
-		Type:               v1alpha1.ConditionTypeAvailable,
-		Status:             v1alpha1.ConditionFalse,
-		Reason:             reasonMinReplicasUnavailable,
-		Message:            fmt.Sprintf("waiting for procs to become available (%d/%d)", available, replicas),
-		ObservedGeneration: gen,
-		LastTransitionTime: now,
-		LastUpdateTime:     now,
-	}
-	if available >= replicas {
-		avail.Status = v1alpha1.ConditionTrue
-		avail.Reason = reasonMinReplicasAvailable
-		avail.Message = "minimum number of replicas is available"
-	}
+	avail := availableCondition(available, replicas, gen, now)
 
 	complete := rolloutComplete(current, stale, int(replicas), partition, d.Spec.MinReadySeconds, nowT)
 	// The counts in the message are load-bearing: any real progress changes

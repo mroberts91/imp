@@ -30,6 +30,7 @@ var kindByPlural = map[string]string{
 	"procs":   v1alpha1.KindProc,
 	"events":  v1alpha1.KindEvent,
 	"timers":  v1alpha1.KindTimer,
+	"configs": v1alpha1.KindConfig,
 }
 
 type Config struct {

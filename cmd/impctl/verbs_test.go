@@ -295,3 +295,35 @@ func TestRolloutStatusTerminalStates(t *testing.T) {
 		t.Errorf("rollout status unknown daemon: %q", out)
 	}
 }
+
+// TestRolloutStatusConfigMissing pins that a Daemon held on a missing Config
+// makes rollout status exit nonzero with the reason, rather than watching
+// forever (the hold is not a terminal Deployment state on its own).
+func TestRolloutStatusConfigMissing(t *testing.T) {
+	socket := startServer(t)
+	manifest := writeManifest(t, webManifest)
+	impctl(t, socket, false, "apply", "-f", manifest)
+
+	c := client.New(socket)
+	d, err := c.GetDaemon(t.Context(), "web")
+	if err != nil {
+		t.Fatalf("GetDaemon: %v", err)
+	}
+	d.Status.ObservedGeneration = d.Metadata.Generation
+	v1alpha1.SetStatusCondition(&d.Status.Conditions, v1alpha1.Condition{
+		Type:    v1alpha1.ConditionTypeProgressing,
+		Status:  v1alpha1.ConditionTrue,
+		Reason:  v1alpha1.ReasonConfigMissing,
+		Message: `waiting for config "app" to exist`,
+	})
+	if _, err := c.UpdateDaemonStatus(t.Context(), d); err != nil {
+		t.Fatalf("UpdateDaemonStatus: %v", err)
+	}
+
+	// Exits nonzero (the `true`) and surfaces the missing config — and does not
+	// hang: a hang would block this subprocess call indefinitely.
+	out := impctl(t, socket, true, "rollout", "status", "web")
+	if !strings.Contains(out, "config") || !strings.Contains(out, "app") {
+		t.Errorf("rollout status ConfigMissing output: %q", out)
+	}
+}

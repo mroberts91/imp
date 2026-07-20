@@ -27,6 +27,7 @@ var pluralByKind = map[string]string{
 	v1alpha1.KindProc:   "procs",
 	v1alpha1.KindEvent:  "events",
 	v1alpha1.KindTimer:  "timers",
+	v1alpha1.KindConfig: "configs",
 }
 
 type Client struct {

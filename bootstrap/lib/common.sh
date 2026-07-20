@@ -158,8 +158,16 @@ ensure_dirs() {
 }
 
 install_binaries() {
-    install_bin "$(find_binary impd)"   "$IMP_BIN_DIR"
-    install_bin "$(find_binary impctl)" "$IMP_BIN_DIR"
+    # Split declaration from assignment (the cmd_adhoc pattern): die inside
+    # "$( )" only exits the subshell, and inlining it in install_bin's
+    # arguments would carry on with an empty path ("install: cannot stat ''"
+    # — found live on the Alpine runbook). As standalone assignments under
+    # set -e, a failed lookup aborts the install here instead.
+    local impd impctl
+    impd="$(find_binary impd)"
+    impctl="$(find_binary impctl)"
+    install_bin "$impd"   "$IMP_BIN_DIR"
+    install_bin "$impctl" "$IMP_BIN_DIR"
 }
 
 # Print the "how to actually use it" epilogue common to system installs.

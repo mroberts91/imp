@@ -260,7 +260,7 @@ tasks:
   test:short:
     desc: Run tests in short mode (skip integration)
     cmds:
-      - go test -short ./...
+      - go tool gotestsum --format testname ./... -short
 
   coverage:
     desc: Generate HTML coverage report

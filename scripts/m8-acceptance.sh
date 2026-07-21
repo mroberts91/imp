@@ -29,7 +29,9 @@ die() { printf 'ACCEPT FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'ok: %s\n' "$*"; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "need $1 on PATH"; }
-need task
+# Alpine packages Task as go-task (name clash with taskwarrior).
+TASK="$(command -v task || command -v go-task || true)"
+[ -n "$TASK" ] || die "need task (or go-task) on PATH"
 need curl
 
 if [[ "$(id -u)" == "0" ]]; then
@@ -37,7 +39,7 @@ if [[ "$(id -u)" == "0" ]]; then
 fi
 
 log "building binaries"
-task build >/dev/null
+"$TASK" build >/dev/null
 
 WORKDIR="${TMPDIR:-/tmp}/imp-m8-acceptance-$$"
 SOCKET="$WORKDIR/impd.sock"

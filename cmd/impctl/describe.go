@@ -418,20 +418,26 @@ func describeNotifier(w io.Writer, n *v1alpha1.Notifier, runs []v1alpha1.Proc, e
 	fmt.Fprintf(w, "\nLast Notification:\t%s\n", formatTime(n.Status.LastNotificationTime))
 
 	if len(runs) > 0 {
-		// Newest first — the ledger reads like a pager history.
+		// Newest first — the ledger reads like a pager history. Through a
+		// tabwriter like every aligned describe section: raw tabs land on
+		// terminal tab stops, and a 16-char reason glued itself to the age
+		// column ("CrashLoopBackOff24s", M10 Alpine runbook).
 		slices.SortFunc(runs, func(a, b v1alpha1.Proc) int {
 			return b.Metadata.CreationTimestamp.Compare(a.Metadata.CreationTimestamp.Time)
 		})
 		fmt.Fprintf(w, "\nRecent Runs:\n")
+		tw := newTabWriter(w)
+		fmt.Fprintln(tw, "  Name\tPhase\tTarget\tReason\tAge")
 		for i := range runs {
 			r := &runs[i]
 			ann := r.Metadata.Annotations
-			fmt.Fprintf(w, "  %s\t%s\t%s %s\t%s\t%s\n",
+			fmt.Fprintf(tw, "  %s\t%s\t%s %s\t%s\t%s\n",
 				r.Metadata.Name, r.Status.Phase,
 				ann[v1alpha1.AnnotationNotifiedKind], ann[v1alpha1.AnnotationNotifiedName],
 				ann[v1alpha1.AnnotationNotifiedReason],
 				age(r.Metadata.CreationTimestamp))
 		}
+		tw.Flush()
 	}
 
 	printConditions(w, n.Status.Conditions)

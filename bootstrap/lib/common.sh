@@ -175,11 +175,15 @@ install_binaries() {
 }
 
 # Print the "how to actually use it" epilogue common to system installs.
+# Privileged mode: impd runs as root and chgrps the socket (--socket-group),
+# so the owner is root:${IMP_GROUP}, not ${IMP_USER}:${IMP_GROUP}.
 print_socket_access_note() {
+    local owner="${IMP_USER}"
+    [ "$IMP_PRIVILEGED" = 1 ] && owner=root
     cat >&2 <<EOF
 
 ${_c_bold}Grant an admin access to impctl:${_c_reset}
-  The api-server socket is ${IMP_SOCKET} (owner ${IMP_USER}:${IMP_GROUP}, mode 0660).
+  The api-server socket is ${IMP_SOCKET} (owner ${owner}:${IMP_GROUP}, mode 0660).
   Add human operators to the '${IMP_GROUP}' group so they can run impctl:
 
       sudo usermod -aG ${IMP_GROUP} <username>      # then re-login

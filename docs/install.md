@@ -86,19 +86,39 @@ What changes:
 
 Rootless dev (`ad-hoc`, `task run`) is unaffected.
 
-## Alpine Linux / OpenRC notes (M10-c)
+## Alpine Linux / OpenRC notes (M10-c — verified on a fresh Alpine VPS, 2026-07-21)
 
-Alpine is a first-class OpenRC target: the bootstrap already uses busybox
-`adduser -S`/`addgroup -S` when shadow's tools are absent, and impd/impctl
-are static binaries (musl is a non-issue). Two Alpine specifics:
+Alpine is a verified OpenRC target: the full M10 runbook — cold
+`--privileged` install, per-Proc user drops, kernel-enforced
+memory/pids limits, `filesystem:` read-only-root with carve-outs,
+Notifier paging, `kill -9` respawn with D1 re-attach, hands-free reboot,
+and the m1/m10 acceptance gates on musl — passed end to end. The bootstrap
+uses busybox `adduser -S`/`addgroup -S` when shadow's tools are absent,
+and impd/impctl are static binaries (musl is a non-issue). What a fresh
+minimal image needs before `install.sh openrc`:
 
-- **cgroup v2 unified mode:** older Alpine boots OpenRC in hybrid mode.
-  Set `rc_cgroup_mode="unified"` in `/etc/rc.conf` (and reboot) before
-  expecting memory/cpu/pids limits to apply; then follow the prepared-
-  subtree recipe above (`prepare_openrc_cgroup` attempts it at install).
-- The full verification runbook for a fresh Alpine VPS (privileged
-  install, sandbox enforcement, respawn behavior) runs once per host
-  class as part of the M10 close-out; findings land in this section.
+1. **Enable the cgroups service.** Minimal cloud images often ship
+   without it, leaving `/sys/fs/cgroup` empty (nothing mounted):
+
+   ```sh
+   rc-update add cgroups sysinit && rc-service cgroups start
+   ```
+
+2. **cgroup v2 unified mode.** Alpine's OpenRC defaults to hybrid; set
+   `rc_cgroup_mode="unified"` in `/etc/rc.conf` first — with the service
+   already running you can restart it instead of rebooting.
+
+That's all: the init script's `start_pre` recreates the imp cgroup
+subtree and re-enables its controllers on every boot (cgroupfs is
+virtual — install-time preparation alone does not survive a reboot).
+
+Incidentals, verified live: Task is packaged as `go-task` (the
+acceptance scripts and Taskfile accept either; a
+`ln -s "$(command -v go-task)" /usr/local/bin/task` makes docs match
+verbatim); busybox `adduser <user> <group>` replaces `usermod -aG`, and
+group membership applies at next login (`su - <user>` picks it up
+immediately); building on the box wants Go at the `.go-version` pin —
+if apk's Go lags, the official golang.org tarball runs fine on musl.
 
 ## Shutdown behavior
 

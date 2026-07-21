@@ -86,6 +86,25 @@ start_pre() {
     # redirects into it.
     checkpath --file --mode 0640 \
         --owner "${IMP_USER}:${IMP_GROUP}" "${IMP_LOG_FILE}"
+    # Cgroupfs is virtual too: the prepared subtree (install.sh,
+    # prepare_openrc_cgroup) and the parent's controller enablement vanish
+    # on every reboot — impd crash-looped after reboot on the missing dir
+    # (M10 Alpine runbook finding). Recreate both before each start.
+    # Best-effort: impd itself fails loudly with an actionable error if the
+    # root is still unusable.
+    if [ -n "${IMP_CGROUP_ROOT}" ] && [ ! -d "${IMP_CGROUP_ROOT}" ]; then
+        local parent controller
+        parent="$(dirname "${IMP_CGROUP_ROOT}")"
+        for controller in cpu memory pids; do
+            echo "+${controller}" > "${parent}/cgroup.subtree_control" 2>/dev/null \
+                || ewarn "imp: could not enable ${controller} in ${parent} (docs/install.md)"
+        done
+        if mkdir -p "${IMP_CGROUP_ROOT}" 2>/dev/null; then
+            chown "${IMP_USER}:${IMP_GROUP}" "${IMP_CGROUP_ROOT}" 2>/dev/null || true
+        else
+            ewarn "imp: could not create ${IMP_CGROUP_ROOT}; impd will fail to start (docs/install.md)"
+        fi
+    fi
 }
 
 # --- Multi-user supervision ------------------------------------------------

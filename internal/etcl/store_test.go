@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -422,6 +423,35 @@ func TestOperationsAfterClose(t *testing.T) {
 	}
 	if err := s.Close(); err != nil {
 		t.Errorf("second Close: %v", err)
+	}
+}
+
+// TestOpenTightensDBPermissions pins the M10 dogfood finding: the data
+// dir must be world-traversable (0711) so dropped-privilege Procs can
+// reach their materialized configs, which means the store files inside
+// it — every spec, env var, and Config body — must be owner-only on
+// their own. SQLite gives -wal/-shm the db file's permissions, so 0600
+// on the db carries over to journal recreations.
+func TestOpenTightensDBPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "etcl.db")
+
+	s, err := Open(path, nil)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	// A write forces the WAL journal into existence.
+	mustCreate(t, s, "Widget", obj("web", `{"n":1}`, ""))
+
+	for _, p := range []string{path, path + "-wal"} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if got := fi.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %04o, want 0600", p, got)
+		}
 	}
 }
 

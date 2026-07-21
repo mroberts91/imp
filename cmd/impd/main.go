@@ -91,6 +91,14 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data directory: %w", err)
 	}
+	// Traversable-but-not-listable, enforced every start (MkdirAll ignores
+	// mode on an existing dir, and installers created 0750 before M10):
+	// dropped-privilege Procs must traverse the data dir to reach their
+	// IMP_CONFIG_DIR under configs/. Contents guard themselves — etcl
+	// chmods the db 0600, logs/ and configs/ subtrees are group-/owner-only.
+	if err := os.Chmod(dataDir, 0o711); err != nil {
+		return fmt.Errorf("setting data directory mode: %w", err)
+	}
 	store, err := etcl.Open(filepath.Join(dataDir, "etcl.db"), nil)
 	if err != nil {
 		return err

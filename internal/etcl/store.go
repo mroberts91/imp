@@ -127,6 +127,19 @@ func Open(path string, opts *Options) (*Store, error) {
 		lock.Close()
 		return nil, fmt.Errorf("etcl: initializing schema: %w", err)
 	}
+	// Owner-only, always: the store carries every spec, env var, and Config
+	// body, and it must stay private even when the data dir above it is
+	// world-traversable (execd's config materialization requires o+x on the
+	// data dir so dropped-privilege Procs can reach IMP_CONFIG_DIR).
+	// SQLite gives -wal/-shm the main db file's permissions, so tightening
+	// the db here covers future journal recreations too.
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			lock.Close()
+			return nil, fmt.Errorf("etcl: tightening %s permissions: %w", p, err)
+		}
+	}
 	s := &Store{db: db, opts: opts.withDefaults(), lock: lock, watchers: map[int64]*watcher{}}
 	if s.rv, err = s.loadMeta("rv"); err != nil {
 		db.Close()

@@ -150,8 +150,12 @@ ensure_user() {
 
 ensure_dirs() {
     # Data (SQLite object store, later Proc logs) and impd's own log file are
-    # impd's to write -> owned by imp.
-    make_dir "$IMP_DATA_DIR" "$IMP_USER" "$IMP_GROUP" 0750
+    # impd's to write -> owned by imp. The data dir is 0711 (traversable,
+    # not listable): dropped-privilege Procs must pass through it to reach
+    # their materialized configs under configs/; the contents guard
+    # themselves (etcl.db is 0600, logs/ and configs/ are group-/owner-only).
+    # impd re-asserts this mode on every start.
+    make_dir "$IMP_DATA_DIR" "$IMP_USER" "$IMP_GROUP" 0711
     make_dir "$IMP_LOG_DIR"  "$IMP_USER" "$IMP_GROUP" 0750
     # Manifests are the admin's to write, impd's to read -> root owns, imp
     # reads via group. 0750 keeps them off-limits to everyone else.

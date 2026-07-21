@@ -39,6 +39,18 @@ func startServer(t *testing.T) string {
 	srv := apiserver.New(apiserver.Config{
 		Store:   store,
 		Version: v1alpha1.VersionInfo{Version: "v0.0.0-test"},
+		Info: v1alpha1.ServerInfo{
+			Socket:          "/run/imp/impd.sock",
+			DataDir:         "/var/lib/imp",
+			ManifestDir:     "/etc/imp/manifests",
+			LogDir:          "/var/lib/imp/logs",
+			ConfigDir:       "/var/lib/imp/configs",
+			CgroupRoot:      "/tmp/fake-cgroup",
+			MetricsAddr:     "127.0.0.1:9090",
+			LogLevel:        "info",
+			EventTTLSeconds: 3600,
+			PID:             42,
+		},
 	})
 	socket := filepath.Join(dir, "impd.sock")
 	l, err := apiserver.Listen(socket)
@@ -192,6 +204,34 @@ func TestVersion(t *testing.T) {
 	if !strings.Contains(out, "Client:") || !strings.Contains(out, "Server: v0.0.0-test") {
 		t.Errorf("version output:\n%s", out)
 	}
+}
+
+func TestInfo(t *testing.T) {
+	socket := startServer(t)
+
+	out := impctl(t, socket, false, "info")
+	for _, want := range []string{
+		"Server:", "v0.0.0-test",
+		"Manifest directory:", "/etc/imp/manifests",
+		"Process logs:", "/var/lib/imp/logs",
+		"Config files:", "/var/lib/imp/configs",
+		"FAKE — limits not kernel-enforced",
+		"Metrics:", "127.0.0.1:9090",
+		"Event TTL:", "1h0m0s",
+		"Privileged:",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("info output missing %q:\n%s", want, out)
+		}
+	}
+
+	jsonOut := impctl(t, socket, false, "info", "-o", "json")
+	if !strings.Contains(jsonOut, `"manifestDir": "/etc/imp/manifests"`) ||
+		!strings.Contains(jsonOut, `"cgroupKernelEnforced": false`) {
+		t.Errorf("info -o json output:\n%s", jsonOut)
+	}
+
+	impctl(t, socket, true, "info", "-o", "bogus")
 }
 
 func TestLogsResolvesDaemonWithNoProcs(t *testing.T) {

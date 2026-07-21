@@ -22,6 +22,10 @@ impd places every Proc in a child of a writable **cgroup v2** directory
 3. `/sys/fs/cgroup/system.slice/imp.service` if present and writable
 4. Otherwise startup fails with a message pointing here
 
+`impctl info` shows the root a running impd resolved and whether it is
+kernel-enforced. If the host's cgroup v2 mount itself is missing or
+hybrid, see [Cgroups v2: detect, enable, recover](#cgroups-v2-detect-enable-recover).
+
 ### systemd
 
 The unit ships with `Delegate=yes` and **omits** `--cgroup-root` so auto-detect
@@ -119,6 +123,80 @@ verbatim); busybox `adduser <user> <group>` replaces `usermod -aG`, and
 group membership applies at next login (`su - <user>` picks it up
 immediately); building on the box wants Go at the `.go-version` pin —
 if apk's Go lags, the official golang.org tarball runs fine on musl.
+
+## Cgroups v2: detect, enable, recover
+
+The runbook for a host where the cgroup v2 mount is missing, hybrid, or
+broke after a reboot. Two symptoms point here:
+
+- impd refuses to start: `no usable cgroup root: set --cgroup-root …`
+  (deliberate — imp does not run half-enforced; see resolution order above).
+- Limits silently do nothing: `impctl info` shows the cgroup root marked
+  `FAKE — limits not kernel-enforced`.
+
+**Start with `impctl info`** (daemon running) — it reports the cgroup root
+impd is actually using and whether it sits on a real cgroup2 filesystem.
+If impd is down, go straight to detection.
+
+### Detect
+
+```sh
+cat /sys/fs/cgroup/cgroup.controllers
+```
+
+- Prints a list including `cpu`, `memory`, `pids` → **v2 unified is
+  mounted** and the controllers imp needs exist. The mount is fine; if
+  imp still fails, the problem is the imp subtree (see below).
+- File missing but `/sys/fs/cgroup` contains controller-named
+  subdirectories (`cpu/`, `memory/`, …) → **v1/hybrid layout**; imp
+  requires unified.
+- `/sys/fs/cgroup` empty or absent → **nothing is mounted** (minimal
+  images that ship without a cgroups boot service).
+
+### Enable — OpenRC (Alpine)
+
+As root:
+
+```sh
+# 1. unified mode (Alpine defaults to hybrid) — edit, don't append a duplicate:
+#    /etc/rc.conf:  rc_cgroup_mode="unified"
+# 2. mount at every boot:
+rc-update add cgroups sysinit
+# 3. apply now (restart if it was already running in hybrid mode):
+rc-service cgroups restart
+cat /sys/fs/cgroup/cgroup.controllers   # should now list cpu memory pids
+```
+
+No reboot is strictly needed, but reboot once at the end to prove the
+configuration persists.
+
+### Enable — systemd
+
+v2 unified has been the default since systemd 243 (all current distros).
+A host still on legacy/hybrid was pinned by a kernel argument — remove
+`systemd.unified_cgroup_hierarchy=0` / `systemd.legacy_systemd_cgroup_controller`
+from the bootloader config, or force unified with
+`systemd.unified_cgroup_hierarchy=1`, then reboot.
+
+### The imp subtree heals itself
+
+Once the mount exists, you never rebuild `/sys/fs/cgroup/imp` by hand:
+the OpenRC init script's `start_pre` recreates the subtree, chowns it,
+and re-enables its controllers on **every** service start (cgroupfs is
+virtual — nothing done at install time survives a reboot). Under systemd,
+`Delegate=yes` hands the service its own subtree the same way.
+
+### Recovery sequence (proven on a fresh Alpine VPS, 2026-07-21)
+
+```sh
+cat /sys/fs/cgroup/cgroup.controllers    # empty dir → nothing mounted
+vi /etc/rc.conf                          # rc_cgroup_mode="unified"
+rc-update add cgroups sysinit
+rc-service cgroups restart
+cat /sys/fs/cgroup/cgroup.controllers    # cpuset cpu io memory … pids
+rc-service imp restart                   # start_pre rebuilds /sys/fs/cgroup/imp
+impctl info                              # Cgroup root: … (kernel-enforced)
+```
 
 ## Shutdown behavior
 

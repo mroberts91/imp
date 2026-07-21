@@ -20,6 +20,43 @@ type VersionInfo struct {
 	GoVersion string `json:"goVersion,omitempty"`
 }
 
+// ServerInfo is the wire shape of GET /info: the running impd's effective
+// configuration — resolved flag values plus live facts (the bound metrics
+// address, whether the cgroup root is kernel-enforced) that reading the
+// unit file cannot answer. impd is flags-only, so this endpoint is the one
+// place an operator can ask a live daemon what it is actually using.
+type ServerInfo struct {
+	Version VersionInfo `json:"version"`
+
+	Socket      string `json:"socket"`
+	DataDir     string `json:"dataDir"`
+	ManifestDir string `json:"manifestDir"`
+	// LogDir is where per-Proc process logs are written (under DataDir).
+	LogDir string `json:"logDir"`
+	// ConfigDir is the Config materialization base: each Proc's rendered
+	// config files live under it, exposed to children as IMP_CONFIG_DIR.
+	ConfigDir string `json:"configDir"`
+
+	CgroupRoot string `json:"cgroupRoot"`
+	// CgroupKernelEnforced is false when the cgroup root is a plain
+	// directory (the ad-hoc/rootless fake root): limits are accepted but
+	// not enforced by the kernel.
+	CgroupKernelEnforced bool `json:"cgroupKernelEnforced"`
+
+	// MetricsAddr is the bound listen address, empty when disabled.
+	MetricsAddr         string `json:"metricsAddr,omitempty"`
+	LogLevel            string `json:"logLevel"`
+	EventTTLSeconds     int    `json:"eventTTLSeconds"`
+	KillProcsOnShutdown bool   `json:"killProcsOnShutdown"`
+	SocketGroup         string `json:"socketGroup,omitempty"`
+
+	// Privileged reports whether impd runs as root (per-Proc users,
+	// sandboxing, and kernel limits available).
+	Privileged bool `json:"privileged"`
+	PID        int  `json:"pid"`
+	StartedAt  Time `json:"startedAt,omitzero"`
+}
+
 // ProcStat is one Proc's point-in-time resource observation, served by
 // GET /apis/impd.sh/v1alpha1/stats for `impctl top`. Observations, not
 // objects: they never touch the store. CPUUsageUsec is cumulative — rates

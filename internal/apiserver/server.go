@@ -41,6 +41,9 @@ type Config struct {
 	Logs    LogStreamer
 	Stats   StatsProvider
 	Version v1alpha1.VersionInfo
+	// Info is the daemon's effective configuration served at GET /info;
+	// its Version field is overwritten with Version above.
+	Info v1alpha1.ServerInfo
 }
 
 type Server struct {
@@ -48,14 +51,16 @@ type Server struct {
 	logs    LogStreamer
 	stats   StatsProvider
 	version v1alpha1.VersionInfo
+	info    v1alpha1.ServerInfo
 	mux     *http.ServeMux
 }
 
 func New(cfg Config) *Server {
-	s := &Server{store: cfg.Store, logs: cfg.Logs, stats: cfg.Stats, version: cfg.Version}
+	s := &Server{store: cfg.Store, logs: cfg.Logs, stats: cfg.Stats, version: cfg.Version, info: cfg.Info}
 	if s.version.GoVersion == "" {
 		s.version.GoVersion = runtime.Version()
 	}
+	s.info.Version = s.version
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /apis/impd.sh/v1alpha1/{kinds}", s.handleList)
@@ -72,6 +77,9 @@ func New(cfg Config) *Server {
 	})
 	mux.HandleFunc("GET /version", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, s.version)
+	})
+	mux.HandleFunc("GET /info", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.info)
 	})
 	s.mux = mux
 	return s

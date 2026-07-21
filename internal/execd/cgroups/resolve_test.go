@@ -72,6 +72,25 @@ func TestResolveRootEmptyFailsWithoutDelegate(t *testing.T) {
 	}
 }
 
+func TestIsKernelRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := SetupFakeRoot(dir); err != nil {
+		t.Fatal(err)
+	}
+	if IsKernelRoot(dir) {
+		t.Fatalf("fake root %q reported as kernel-enforced", dir)
+	}
+	if IsKernelRoot(filepath.Join(dir, "does-not-exist")) {
+		t.Fatal("missing path reported as kernel-enforced")
+	}
+	// Only assert the positive case where a unified hierarchy is mounted.
+	if _, err := os.Stat(filepath.Join(sysfsCgroup, fileControllers)); err == nil {
+		if !IsKernelRoot(sysfsCgroup) {
+			t.Fatalf("%s has %s but IsKernelRoot is false", sysfsCgroup, fileControllers)
+		}
+	}
+}
+
 func TestValidateRootShapeWritable(t *testing.T) {
 	dir := t.TempDir()
 	if err := SetupFakeRoot(dir); err != nil {

@@ -494,6 +494,42 @@ func TestUnknownResourceAndVersion(t *testing.T) {
 	}
 }
 
+func TestServerInfo(t *testing.T) {
+	f := startWith(t, nil, func(cfg *apiserver.Config) {
+		cfg.Info = v1alpha1.ServerInfo{
+			// A stale Version here must lose to cfg.Version.
+			Version:              v1alpha1.VersionInfo{Version: "bogus"},
+			Socket:               "/run/imp/impd.sock",
+			DataDir:              "/var/lib/imp",
+			ManifestDir:          "/etc/imp/manifests",
+			LogDir:               "/var/lib/imp/logs",
+			ConfigDir:            "/var/lib/imp/configs",
+			CgroupRoot:           "/sys/fs/cgroup/system.slice/imp.service",
+			CgroupKernelEnforced: true,
+			MetricsAddr:          "127.0.0.1:9090",
+			LogLevel:             "info",
+			EventTTLSeconds:      3600,
+			PID:                  42,
+		}
+	})
+
+	info, err := f.client.ServerInfo(t.Context())
+	if err != nil {
+		t.Fatalf("ServerInfo: %v", err)
+	}
+	if info.Version.Version != "test" || info.Version.Commit != "abc123" || info.Version.GoVersion == "" {
+		t.Errorf("info.Version not taken from Config.Version: %+v", info.Version)
+	}
+	if info.Socket != "/run/imp/impd.sock" || info.ManifestDir != "/etc/imp/manifests" ||
+		info.LogDir != "/var/lib/imp/logs" || info.ConfigDir != "/var/lib/imp/configs" {
+		t.Errorf("paths not round-tripped: %+v", info)
+	}
+	if !info.CgroupKernelEnforced || info.MetricsAddr != "127.0.0.1:9090" ||
+		info.EventTTLSeconds != 3600 || info.PID != 42 {
+		t.Errorf("facts not round-tripped: %+v", info)
+	}
+}
+
 // fakeStreamer serves log content and records the request.
 type fakeStreamer struct {
 	gotName string

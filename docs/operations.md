@@ -101,6 +101,20 @@ deadline.
   annotated `impd.sh/manual`). Manual runs count as active for
   `concurrencyPolicy` but never advance `lastScheduleTime`.
 
+## Effective configuration: impctl info
+
+impd is configured by flags alone, so "what is this daemon actually
+using" is a question for the daemon, not the unit file. `impctl info`
+(GET `/info`) answers it: every directory (manifest, data, per-Proc logs,
+the `IMP_CONFIG_DIR` materialization base), the socket path and group,
+log level, event TTL, shutdown behavior, metrics address, version, and
+two live facts flags can't tell you — the **bound** metrics address
+(matters with `--metrics-addr :0`) and whether the cgroup root is
+**kernel-enforced** or a rootless fake (limits accepted but not
+enforced). `-o json|yaml` for scripts. When diagnosing limits that
+"don't work" or a missing cgroup mount, run it first — then see
+install.md's cgroups v2 recovery runbook.
+
 ## Metrics
 
 Scrape `GET /metrics` on `--metrics-addr` (default `127.0.0.1:9090`).

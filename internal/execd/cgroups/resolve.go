@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 const sysfsCgroup = "/sys/fs/cgroup"
@@ -42,6 +44,18 @@ func ResolveRoot(explicit string) (string, error) {
 	}
 
 	return "", fmt.Errorf("no usable cgroup root: set --cgroup-root to a writable cgroup v2 directory, or run under systemd with Delegate=yes on the imp unit (ad-hoc/rootless: pass a SetupFakeRoot path from bootstrap)")
+}
+
+// IsKernelRoot reports whether root sits on a cgroup2 filesystem, i.e.
+// whether limits written under it are kernel-enforced. A SetupFakeRoot
+// tempdir satisfies the filesystem contract NewManager checks but not
+// this: it accepts limit writes without enforcing anything.
+func IsKernelRoot(root string) bool {
+	var st unix.Statfs_t
+	if err := unix.Statfs(root, &st); err != nil {
+		return false
+	}
+	return st.Type == unix.CGROUP2_SUPER_MAGIC
 }
 
 // validateRootShape checks cgroup.controllers exists and subtree_control is writable.

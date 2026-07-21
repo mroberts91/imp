@@ -96,13 +96,15 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		return err
 	}
 
-	logStore := logs.New(filepath.Join(dataDir, "logs"), clock.Real{})
+	logDir := filepath.Join(dataDir, "logs")
+	configDir := filepath.Join(dataDir, "configs")
+	logStore := logs.New(logDir, clock.Real{})
 
 	// Everything below is inert construction — nothing dials or runs until
 	// Serve / Run. The supervisor is built before the api-server so it can
 	// be wired in as the StatsProvider behind /stats (impctl top).
 	ctlClient := client.New(socketPath)
-	configStore := configfiles.New(filepath.Join(dataDir, "configs"), ctlClient)
+	configStore := configfiles.New(configDir, ctlClient)
 	clk := clock.Real{}
 	met := metrics.New()
 	manifestRec := recorder.New(ctlClient, "manifest", clk)
@@ -120,12 +122,37 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 	execMgr = supervisor.NewManager(ctlClient, execInf.Store(), logStore, configStore, cgMgr, clk, execRec, killProcsOnShutdown)
 	execMgr.SetMetrics(met)
 
+	// The metrics listener binds before the api-server is constructed so
+	// GET /info can report the actual bound address.
+	metricsBound, metricsShutdown, err := metrics.ListenAndServe(metricsAddr, met)
+	if err != nil {
+		store.Close()
+		return err
+	}
+
 	server := apiserver.New(apiserver.Config{
 		Store: store,
 		Logs:  logStore,
 		Stats: execMgr,
 		Version: v1alpha1.VersionInfo{
 			Version: version, Commit: commit, Branch: branch, BuildTime: buildTime,
+		},
+		Info: v1alpha1.ServerInfo{
+			Socket:               socketPath,
+			DataDir:              dataDir,
+			ManifestDir:          manifestDir,
+			LogDir:               logDir,
+			ConfigDir:            configDir,
+			CgroupRoot:           cgroupRoot,
+			CgroupKernelEnforced: cgroups.IsKernelRoot(cgroupRoot),
+			MetricsAddr:          metricsBound,
+			LogLevel:             logLevel,
+			EventTTLSeconds:      int(eventTTL.Seconds()),
+			KillProcsOnShutdown:  killProcsOnShutdown,
+			SocketGroup:          socketGroup,
+			Privileged:           os.Geteuid() == 0,
+			PID:                  os.Getpid(),
+			StartedAt:            v1alpha1.NewTime(clk.Now()),
 		},
 	})
 	listener, err := apiserver.Listen(socketPath)
@@ -213,12 +240,6 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 
 	ttlCtl := eventttl.New(ctlClient, eventTTL, clk)
 
-	metricsBound, metricsShutdown, err := metrics.ListenAndServe(metricsAddr, met)
-	if err != nil {
-		store.Close()
-		return err
-	}
-
 	scraperDone := make(chan struct{})
 	go func() {
 		defer close(scraperDone)
@@ -286,6 +307,7 @@ func run(socketPath, dataDir, manifestDir, logLevel string, eventTTL time.Durati
 		"version", version, "commit", commit,
 		"socket", socketPath, "dataDir", dataDir, "manifestDir", manifestDir,
 		"cgroupRoot", cgroupRoot,
+		"cgroupKernelEnforced", cgroups.IsKernelRoot(cgroupRoot),
 		"killProcsOnShutdown", killProcsOnShutdown,
 		"metricsAddr", metricsBound,
 		"eventTTL", eventTTL.String())

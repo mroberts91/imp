@@ -228,6 +228,22 @@ func (c *Client) ServerVersion(ctx context.Context) (*v1alpha1.VersionInfo, erro
 	return &v, nil
 }
 
+// ServerInfo returns the running impd's effective configuration
+// (GET /info): resolved flag values plus live facts like the bound
+// metrics address and cgroup enforcement. ErrNotFound means the serving
+// impd predates the endpoint.
+func (c *Client) ServerInfo(ctx context.Context) (*v1alpha1.ServerInfo, error) {
+	raw, err := c.doJSON(ctx, http.MethodGet, "/info", nil)
+	if err != nil {
+		return nil, err
+	}
+	var info v1alpha1.ServerInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return nil, fmt.Errorf("client: decoding info: %w", err)
+	}
+	return &info, nil
+}
+
 // Stats returns point-in-time resource observations for running Procs
 // (the data behind impctl top). 501 when the serving impd has no stats
 // provider wired.

@@ -48,6 +48,7 @@ the access model.`,
 		newRunCmd(newClient),
 		newRolloutCmd(newClient),
 		newTopCmd(newClient),
+		newInfoCmd(newClient),
 		newVersionCmd(newClient),
 	)
 	return root

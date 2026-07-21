@@ -127,10 +127,13 @@ func TestShimScrubsPayloadFromEnvironment(t *testing.T) {
 
 func TestShimPreservesArgvAndPlainSpawn(t *testing.T) {
 	// A payload with no setup fields must behave exactly like a direct
-	// exec — the always-shim regression guard.
+	// exec — the always-shim regression guard. The rename target is this
+	// test binary in TestMain's print-argv0 mode, argv[0]-agnostic on
+	// every libc (see TestMain for why a shell can't play the part).
+	t.Setenv("IMP_TEST_PRINT_ARGV0", "1")
 	out, code := reexec(t, &Payload{
-		Exe:  "/bin/sh",
-		Argv: []string{"custom-argv0", "-c", `echo "$0"`},
+		Exe:  "/proc/self/exe",
+		Argv: []string{"custom-argv0"},
 	})
 	if code != 0 {
 		t.Fatalf("shim exited %d: %s", code, out)

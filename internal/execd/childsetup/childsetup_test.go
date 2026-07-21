@@ -5,6 +5,7 @@ package childsetup
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -19,6 +20,16 @@ import (
 // the payload env set, and MaybeRun takes over in the child.
 func TestMain(m *testing.M) {
 	MaybeRun()
+	// Helper mode for TestShimPreservesArgvAndPlainSpawn: after the shim
+	// execve'd this binary as the TARGET, report the argv[0] it delivered.
+	// A shell can't be the rename target: busybox sh (Alpine's /bin/sh)
+	// dispatches applets BY argv[0] and exits 127 on a renamed one — the
+	// failure that proved delivery on the M10 Alpine runbook, at the cost
+	// of the spawn.
+	if os.Getenv("IMP_TEST_PRINT_ARGV0") == "1" {
+		fmt.Println(os.Args[0])
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
 }
 
